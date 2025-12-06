@@ -104,7 +104,44 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
+# CORS settings
 CORS_ALLOW_ALL_ORIGINS = os.environ.get("CORS_ALLOW_ALL", "true").lower() in {"1", "true", "yes"}
+
+# Если CORS_ALLOW_ALL не включен, используем список разрешенных доменов
+if not CORS_ALLOW_ALL_ORIGINS:
+    allowed_origins_str = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+    if allowed_origins_str:
+        CORS_ALLOWED_ORIGINS = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
+    else:
+        # По умолчанию разрешаем localhost и текущий домен
+        CORS_ALLOWED_ORIGINS = [
+            "http://localhost:3000",
+            "http://localhost:666",
+            "http://127.0.0.1:666",
+            "http://91.147.104.165:666",
+        ]
+
+# Дополнительные настройки CORS для Swagger
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "dnt",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
