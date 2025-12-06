@@ -76,26 +76,31 @@ def periodic_market_update():
     """Периодическая задача для обновления данных рынка (запускается по расписанию)"""
     from trading.models import Symbol
 
-    active_symbols = Symbol.objects.filter(is_active=True).select_related("user").distinct("user")
+    # Получаем уникальных пользователей, у которых есть активные символы
+    user_ids = Symbol.objects.filter(is_active=True).values_list("user_id", flat=True).distinct()
 
-    for symbol in active_symbols:
-        user = symbol.user
-        # Проверяем, запущен ли мониторинг для этого пользователя
+    for user_id in user_ids:
         try:
-            status_obj = AgentStatus.objects.get(user=user, agent_type="MARKET_MONITOR")
-            if status_obj.status == "RUNNING":
-                # Обновляем данные для всех символов пользователя
-                market_service = get_market_data_service()
-                user_symbols = Symbol.objects.filter(user=user, is_active=True)
-                for sym in user_symbols:
-                    data = market_service.get_latest_data(sym.symbol)
-                    if data:
-                        MarketData.objects.create(symbol=sym, **data)
+            user = User.objects.get(id=user_id)
+            # Проверяем, запущен ли мониторинг для этого пользователя
+            try:
+                status_obj = AgentStatus.objects.get(user=user, agent_type="MARKET_MONITOR")
+                if status_obj.status == "RUNNING":
+                    # Обновляем данные для всех символов пользователя
+                    market_service = get_market_data_service()
+                    user_symbols = Symbol.objects.filter(user=user, is_active=True)
+                    for sym in user_symbols:
+                        data = market_service.get_latest_data(sym.symbol)
+                        if data:
+                            MarketData.objects.create(symbol=sym, **data)
 
-                status_obj.last_activity = timezone.now()
-                status_obj.save()
-        except AgentStatus.DoesNotExist:
-            pass
+                    status_obj.last_activity = timezone.now()
+                    status_obj.save()
+            except AgentStatus.DoesNotExist:
+                pass
+        except User.DoesNotExist:
+            logger.warning(f"User {user_id} not found, skipping")
+            continue
 
 
 def stop_market_monitoring(user_id: int):
