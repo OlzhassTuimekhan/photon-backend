@@ -129,7 +129,7 @@ class BybitDataService:
                 "change": change_24h,
                 "change_percent": change_percent_24h,
                 "timestamp": datetime.now(),
-                "name": symbol,  # Bybit не возвращает название, используем символ
+                # 'name' не нужен для MarketData - это поле только в Symbol
             }
         except Exception as e:
             logger.error(f"Error fetching Bybit data for {symbol}: {str(e)}", exc_info=True)
@@ -313,7 +313,7 @@ class MarketDataService:
                 "change": Decimal(str(change)),
                 "change_percent": Decimal(str(round(change_percent, 4))),
                 "timestamp": datetime.now(),
-                "name": info.get("longName") or info.get("shortName") or symbol,
+                # 'name' не нужен для MarketData - это поле только в Symbol
             }
         except Exception as e:
             logger.error(f"Error fetching yfinance data for {symbol}: {str(e)}", exc_info=True)
