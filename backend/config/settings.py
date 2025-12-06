@@ -25,6 +25,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "corsheaders",
     "rest_framework",
+    "drf_spectacular",
     "core",
     "trading",
 ]
@@ -94,6 +95,7 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
 
 SIMPLE_JWT = {
@@ -117,6 +119,16 @@ MARKET_DATA_SOURCE = os.environ.get("MARKET_DATA_SOURCE", "auto")  # auto, yfina
 BYBIT_API_KEY = os.environ.get("BYBIT_API_KEY", "")
 BYBIT_SECRET_KEY = os.environ.get("BYBIT_SECRET_KEY", "")
 BYBIT_TESTNET = os.environ.get("BYBIT_TESTNET", "false").lower() in {"1", "true", "yes"}
+
+# Swagger/OpenAPI settings
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Photon Trading API",
+    "DESCRIPTION": "Multi-Agent Trading System API Documentation",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
+    "SCHEMA_PATH_PREFIX": "/api/",
+}
 
 LOGGING = {
     "version": 1,
