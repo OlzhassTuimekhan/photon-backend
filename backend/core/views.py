@@ -1,3 +1,5 @@
+import logging
+
 from django.http import JsonResponse
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -7,6 +9,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from core.serializers import RegisterSerializer, UserSerializer
+
+logger = logging.getLogger(__name__)
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -25,15 +29,29 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 
+    def post(self, request, *args, **kwargs):
+        email = request.data.get("email", "unknown")
+        ip_address = request.META.get("REMOTE_ADDR", "unknown")
+        logger.info(f"Login attempt from {ip_address} for email: {email}")
+        try:
+            response = super().post(request, *args, **kwargs)
+            logger.info(f"Login successful for email: {email}")
+            return response
+        except Exception as e:
+            logger.warning(f"Login failed for email: {email} - {str(e)}")
+            raise
+
 
 class RegisterView(APIView):
     permission_classes = (permissions.AllowAny,)
 
     def post(self, request):
+        logger.info(f"Register request from {request.META.get('REMOTE_ADDR')} for email: {request.data.get('email')}")
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         refresh = RefreshToken.for_user(user)
+        logger.info(f"User registered successfully: {user.email}")
         return Response(
             {
                 "user": UserSerializer(user).data,
