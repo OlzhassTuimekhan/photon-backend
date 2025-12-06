@@ -100,22 +100,45 @@ class MarketDataViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"])
     def latest(self, request):
         """Получить последние данные для всех символов пользователя"""
-        symbols = Symbol.objects.filter(user=request.user, is_active=True)
-        result = []
+        try:
+            symbols = Symbol.objects.filter(user=request.user, is_active=True)
+            result = []
+            errors = []
 
-        for symbol in symbols:
-            latest_data = MarketData.objects.filter(symbol=symbol).order_by("-timestamp").first()
-            if latest_data:
-                result.append(MarketDataSerializer(latest_data).data)
-            else:
-                # Если нет данных в БД, получаем напрямую из API
-                market_service = get_market_data_service()
-                data = market_service.get_latest_data(symbol.symbol)
-                if data:
-                    market_data = MarketData.objects.create(symbol=symbol, **data)
-                    result.append(MarketDataSerializer(market_data).data)
+            for symbol in symbols:
+                try:
+                    latest_data = MarketData.objects.filter(symbol=symbol).order_by("-timestamp").first()
+                    if latest_data:
+                        serializer = MarketDataSerializer(latest_data)
+                        result.append(serializer.data)
+                    else:
+                        # Если нет данных в БД, получаем напрямую из API
+                        market_service = get_market_data_service()
+                        data = market_service.get_latest_data(symbol.symbol)
+                        if data:
+                            try:
+                                market_data = MarketData.objects.create(symbol=symbol, **data)
+                                serializer = MarketDataSerializer(market_data)
+                                result.append(serializer.data)
+                            except Exception as create_error:
+                                logger.error(f"Error creating MarketData for {symbol.symbol}: {str(create_error)}", exc_info=True)
+                                errors.append(f"Ошибка создания данных для {symbol.symbol}: {str(create_error)}")
+                        else:
+                            errors.append(f"Не удалось получить данные для {symbol.symbol}")
+                except Exception as e:
+                    logger.error(f"Error getting latest data for {symbol.symbol}: {str(e)}", exc_info=True)
+                    errors.append(f"Ошибка для {symbol.symbol}: {str(e)}")
 
-        return Response(result)
+            response_data = {"data": result}
+            if errors:
+                response_data["errors"] = errors
+            return Response(response_data)
+        except Exception as e:
+            logger.error(f"Error in latest endpoint: {str(e)}", exc_info=True)
+            return Response(
+                {"error": f"Внутренняя ошибка сервера: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=False, methods=["post"])
     def refresh(self, request):
@@ -262,38 +285,59 @@ class DecisionMakerAgentView(APIView):
         """Запросить анализ и решение для символа"""
         from decimal import Decimal
 
-        symbol_id = request.data.get("symbol_id")
-        if not symbol_id:
-            return Response({"detail": "symbol_id required"}, status=status.HTTP_400_BAD_REQUEST)
-
         try:
-            symbol = Symbol.objects.get(id=symbol_id, user=request.user, is_active=True)
-        except Symbol.DoesNotExist:
-            return Response({"detail": "Symbol not found"}, status=status.HTTP_404_NOT_FOUND)
+            symbol_id = request.data.get("symbol_id")
+            if not symbol_id:
+                return Response({"detail": "symbol_id required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Получаем последние данные рынка
-        latest_data = MarketData.objects.filter(symbol=symbol).order_by("-timestamp").first()
-        if not latest_data:
-            # Получаем данные напрямую
-            market_service = get_market_data_service()
-            data = market_service.get_latest_data(symbol.symbol)
-            if not data:
-                return Response({"detail": "No market data available"}, status=status.HTTP_400_BAD_REQUEST)
-            latest_data = MarketData.objects.create(symbol=symbol, **data)
+            try:
+                symbol = Symbol.objects.get(id=symbol_id, user=request.user, is_active=True)
+            except Symbol.DoesNotExist:
+                return Response({"detail": "Symbol not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # TODO: Здесь будет вызов AI модели для принятия решения
-        # Пока возвращаем заглушку
-        decision = TradingDecision.objects.create(
-            user=request.user,
-            symbol=symbol,
-            decision="HOLD",  # Заглушка
-            confidence=Decimal("50.0"),
-            market_data=latest_data,
-            reasoning="AI model not implemented yet. This is a placeholder decision.",
-            metadata={},
-        )
+            # Получаем последние данные рынка
+            latest_data = MarketData.objects.filter(symbol=symbol).order_by("-timestamp").first()
+            if not latest_data:
+                # Получаем данные напрямую
+                market_service = get_market_data_service()
+                data = market_service.get_latest_data(symbol.symbol)
+                if not data:
+                    return Response({"detail": "No market data available"}, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    latest_data = MarketData.objects.create(symbol=symbol, **data)
+                except Exception as create_error:
+                    logger.error(f"Error creating MarketData: {str(create_error)}", exc_info=True)
+                    return Response(
+                        {"detail": f"Ошибка создания данных рынка: {str(create_error)}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
 
-        return Response(TradingDecisionSerializer(decision).data)
+            # TODO: Здесь будет вызов AI модели для принятия решения
+            # Пока возвращаем заглушку
+            try:
+                decision = TradingDecision.objects.create(
+                    user=request.user,
+                    symbol=symbol,
+                    decision="HOLD",  # Заглушка
+                    confidence=Decimal("50.0"),
+                    market_data=latest_data,
+                    reasoning="AI model not implemented yet. This is a placeholder decision.",
+                    metadata={},
+                )
+                serializer = TradingDecisionSerializer(decision)
+                return Response(serializer.data)
+            except Exception as decision_error:
+                logger.error(f"Error creating TradingDecision: {str(decision_error)}", exc_info=True)
+                return Response(
+                    {"detail": f"Ошибка создания решения: {str(decision_error)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+        except Exception as e:
+            logger.error(f"Error in decision-maker endpoint: {str(e)}", exc_info=True)
+            return Response(
+                {"detail": f"Внутренняя ошибка сервера: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class ExecutionAgentView(APIView):

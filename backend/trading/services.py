@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 
 import yfinance as yf
 import requests
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -248,13 +249,30 @@ class MarketDataService:
         # Используем yfinance
         try:
             ticker = yf.Ticker(symbol)
-            info = ticker.info
+            
+            # Пробуем получить info с таймаутом
+            try:
+                info = ticker.info
+                if not info or len(info) == 0:
+                    logger.warning(f"Empty info for {symbol}, trying alternative method")
+                    info = {}
+            except Exception as info_error:
+                logger.warning(f"Could not get info for {symbol}: {info_error}, continuing with history data")
+                info = {}
 
             # Получаем исторические данные за последний день
-            hist = ticker.history(period="1d", interval="1m")
-            if hist.empty:
-                # Если нет минутных данных, берем дневные
-                hist = ticker.history(period="5d", interval="1d")
+            try:
+                hist = ticker.history(period="1d", interval="1m")
+                if hist.empty:
+                    # Если нет минутных данных, берем дневные
+                    hist = ticker.history(period="5d", interval="1d")
+            except Exception as hist_error:
+                logger.warning(f"Could not get 1d history for {symbol}: {hist_error}, trying 5d")
+                try:
+                    hist = ticker.history(period="5d", interval="1d")
+                except Exception:
+                    logger.error(f"Could not get any history for {symbol}")
+                    return None
 
             if hist.empty:
                 logger.warning(f"No data available for {symbol}")
@@ -264,30 +282,41 @@ class MarketDataService:
             latest = hist.iloc[-1]
 
             # Получаем текущую цену из info или из исторических данных
-            current_price = info.get("currentPrice") or info.get("regularMarketPrice") or float(latest["Close"])
+            try:
+                current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+                if current_price is None:
+                    current_price = float(latest["Close"])
+                else:
+                    current_price = float(current_price)
+            except (ValueError, TypeError):
+                current_price = float(latest["Close"])
 
             # Вычисляем изменение
             if len(hist) > 1:
-                prev_close = float(hist.iloc[-2]["Close"])
-                change = current_price - prev_close
-                change_percent = (change / prev_close) * 100 if prev_close > 0 else 0
+                try:
+                    prev_close = float(hist.iloc[-2]["Close"])
+                    change = current_price - prev_close
+                    change_percent = (change / prev_close) * 100 if prev_close > 0 else 0
+                except (IndexError, ValueError, TypeError):
+                    change = 0
+                    change_percent = 0
             else:
                 change = 0
                 change_percent = 0
 
             return {
                 "price": Decimal(str(current_price)),
-                "volume": int(latest["Volume"]) if not hist.empty else None,
-                "high": Decimal(str(latest["High"])) if not hist.empty else None,
-                "low": Decimal(str(latest["Low"])) if not hist.empty else None,
-                "open_price": Decimal(str(latest["Open"])) if not hist.empty else None,
+                "volume": int(float(latest["Volume"])) if not hist.empty and not pd.isna(latest["Volume"]) else None,
+                "high": Decimal(str(float(latest["High"]))) if not hist.empty and not pd.isna(latest["High"]) else None,
+                "low": Decimal(str(float(latest["Low"]))) if not hist.empty and not pd.isna(latest["Low"]) else None,
+                "open_price": Decimal(str(float(latest["Open"]))) if not hist.empty and not pd.isna(latest["Open"]) else None,
                 "change": Decimal(str(change)),
                 "change_percent": Decimal(str(round(change_percent, 4))),
                 "timestamp": datetime.now(),
                 "name": info.get("longName") or info.get("shortName") or symbol,
             }
         except Exception as e:
-            logger.error(f"Error fetching data for {symbol}: {str(e)}", exc_info=True)
+            logger.error(f"Error fetching yfinance data for {symbol}: {str(e)}", exc_info=True)
             return None
 
     def get_historical_data(self, symbol: str, period: str = "1mo", interval: str = "1d") -> Optional[List[Dict]]:
@@ -356,10 +385,26 @@ class MarketDataService:
         # Пробуем yfinance
         try:
             ticker = yf.Ticker(symbol)
-            info = ticker.info
-            # Если есть хотя бы какая-то информация, считаем символ валидным
-            return bool(info)
-        except Exception:
+            # Пробуем получить исторические данные (более надежно чем info)
+            try:
+                hist = ticker.history(period="5d", interval="1d")
+                if not hist.empty:
+                    return True
+            except Exception as hist_error:
+                logger.debug(f"Could not get history for {symbol}: {hist_error}")
+            
+            # Если история не сработала, пробуем info
+            try:
+                info = ticker.info
+                # Если есть хотя бы какая-то информация, считаем символ валидным
+                if info and len(info) > 0:
+                    return True
+            except Exception as info_error:
+                logger.debug(f"Could not get info for {symbol}: {info_error}")
+            
+            return False
+        except Exception as e:
+            logger.debug(f"Error validating symbol {symbol}: {str(e)}")
             return False
 
 
