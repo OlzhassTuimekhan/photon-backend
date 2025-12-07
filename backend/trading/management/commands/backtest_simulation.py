@@ -135,11 +135,22 @@ class Command(BaseCommand):
             )
             
             # Получаем обработанные данные
-            historical_data = market_agent.get_processed_data(analyze=True)
+            # get_processed_data(analyze=True) возвращает кортеж (DataFrame, Dict)
+            result = market_agent.get_processed_data(analyze=True)
             
-            if historical_data.empty:
+            if isinstance(result, tuple):
+                historical_data, analysis = result
+            else:
+                historical_data = result
+            
+            if historical_data is None or historical_data.empty:
                 self.stdout.write(self.style.ERROR("Не удалось загрузить исторические данные"))
                 return
+            
+            # Убеждаемся, что индекс - это timestamp
+            # После preprocess может быть колонка timestamp, а не индекс
+            if 'timestamp' in historical_data.columns:
+                historical_data = historical_data.set_index('timestamp')
             
             # Фильтруем по датам
             historical_data = historical_data[
@@ -231,15 +242,16 @@ class Command(BaseCommand):
                     last_display_time = current_time
                 
                 # Подготовка данных рынка
+                # После preprocess колонки в нижнем регистре (open, close, а не Open, Close)
                 market_message = {
                     "timestamp": timestamp.isoformat() + "Z",
                     "ticker": symbol_code,
                     "ohlcv": {
-                        "open": float(row.get("Open", 0)),
-                        "high": float(row.get("High", 0)),
-                        "low": float(row.get("Low", 0)),
-                        "close": float(row.get("Close", 0)),
-                        "volume": float(row.get("Volume", 0)),
+                        "open": float(row.get("open", row.get("Open", 0))),
+                        "high": float(row.get("high", row.get("High", 0))),
+                        "low": float(row.get("low", row.get("Low", 0))),
+                        "close": float(row.get("close", row.get("Close", 0))),
+                        "volume": float(row.get("volume", row.get("Volume", 0))),
                     },
                     "indicators": {
                         "sma10": float(row.get("sma10", 0)),
