@@ -975,7 +975,7 @@ class MarketHeatmapView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Получить данные для heatmap (топ гейнеры и лузеры)"""
+        """Получить данные для heatmap (все активные символы с изменениями)"""
         # Получаем все активные символы пользователя
         symbols = Symbol.objects.filter(user=request.user, is_active=True)
 
@@ -988,12 +988,18 @@ class MarketHeatmapView(APIView):
                 current = latest_data[0]
                 previous = latest_data[1]
                 
+                # Рассчитываем процент изменения
+                change_percent = 0.0
+                if previous.price > 0:
+                    change_percent = ((current.price - previous.price) / previous.price) * 100
+                
                 market_data_list.append({
                     "symbol": symbol.symbol,
                     "price": float(current.price),
                     "previousPrice": float(previous.price),
                     "volume": int(current.volume) if current.volume else 0,
                     "timestamp": current.timestamp,
+                    "changePercent": round(change_percent, 2),
                 })
             elif latest_data.count() == 1:
                 # Если только одна запись, используем её как текущую и предыдущую
@@ -1004,12 +1010,29 @@ class MarketHeatmapView(APIView):
                     "previousPrice": float(current.price),  # Нет изменения
                     "volume": int(current.volume) if current.volume else 0,
                     "timestamp": current.timestamp,
+                    "changePercent": 0.0,
+                })
+            else:
+                # Если нет данных, все равно добавляем символ с нулевыми значениями
+                market_data_list.append({
+                    "symbol": symbol.symbol,
+                    "price": 0.0,
+                    "previousPrice": 0.0,
+                    "volume": 0,
+                    "timestamp": None,
+                    "changePercent": 0.0,
                 })
 
         # Сортируем по изменению (от большего к меньшему)
         market_data_list.sort(
-            key=lambda x: (x["price"] - x["previousPrice"]) / x["previousPrice"] if x["previousPrice"] > 0 else 0,
+            key=lambda x: x.get("changePercent", 0.0),
             reverse=True
         )
 
-        return Response(market_data_list)
+        return Response({
+            "symbols": market_data_list,
+            "total": len(market_data_list),
+            "gainers": [s for s in market_data_list if s.get("changePercent", 0) > 0],
+            "losers": [s for s in market_data_list if s.get("changePercent", 0) < 0],
+            "unchanged": [s for s in market_data_list if s.get("changePercent", 0) == 0],
+        })
