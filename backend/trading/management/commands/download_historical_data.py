@@ -6,6 +6,7 @@
     python manage.py download_historical_data --symbol BTCUSDT --period 1mo --interval 1h
 """
 import os
+import pandas as pd
 from django.core.management.base import BaseCommand
 from trading.agents.market_monitor import MarketMonitoringAgent
 
@@ -125,8 +126,8 @@ class Command(BaseCommand):
             if not isinstance(data_to_save.index, pd.DatetimeIndex):
                 data_to_save.index = pd.to_datetime(data_to_save.index, errors='coerce')
             
-            # Удаляем строки с невалидными датами
-            data_to_save = data_to_save.dropna(subset=[data_to_save.index.name if data_to_save.index.name else None])
+            # Удаляем строки с невалидными датами (NaT - Not a Time)
+            data_to_save = data_to_save[data_to_save.index.notna()]
             
             # Сохраняем с правильным форматом дат
             data_to_save.to_csv(filepath, index=True, date_format='%Y-%m-%d %H:%M:%S')
