@@ -33,6 +33,37 @@ _DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+# Список криптовалютных суффиксов для определения типа символа
+CRYPTO_SUFFIXES = ["USDT", "USDC", "BTC", "ETH", "BNB", "BUSD", "DAI", "TUSD", "PAXG"]
+CRYPTO_PAIRS = ["-USD", "-USDT", "-BTC", "-ETH"]
+
+def is_cryptocurrency(ticker: str) -> bool:
+    """
+    Определяет, является ли символ криптовалютой.
+    
+    Args:
+        ticker: Символ (например, 'BTCUSDT', 'AAPL', 'BTC-USD')
+        
+    Returns:
+        True если криптовалюта, False если акция/другое
+    """
+    ticker_upper = ticker.upper().strip()
+    
+    # Проверяем суффиксы (USDT, USDC и т.д.)
+    if any(suffix in ticker_upper for suffix in CRYPTO_SUFFIXES):
+        return True
+    
+    # Проверяем пары (BTC-USD, ETH-USDT и т.д.)
+    if any(pair in ticker_upper for pair in CRYPTO_PAIRS):
+        return True
+    
+    # Специальные случаи - популярные криптовалюты без суффикса
+    crypto_tickers = ["BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE", "MATIC", "DOT", "AVAX", "LINK", "UNI"]
+    if ticker_upper in crypto_tickers:
+        return True
+    
+    return False
+
 def _setup_yfinance_headers():
     """
     Настраивает заголовки для yfinance запросов.
@@ -153,18 +184,25 @@ class MarketMonitoringAgent:
         # Настраиваем User-Agent заголовки для обхода блокировок Yahoo Finance
         _setup_yfinance_headers()
         
-        # Инициализируем Bybit сервис для fallback (если yfinance не работает)
+        # Определяем тип символа и источник данных
+        self.is_crypto = is_cryptocurrency(self.ticker)
+        
+        # Инициализируем Bybit сервис для криптовалют
         self.bybit_service = None
-        try:
-            from django.conf import settings
-            from trading.services import BybitDataService
-            self.bybit_service = BybitDataService(
-                api_key=getattr(settings, "BYBIT_API_KEY", ""),
-                secret_key=getattr(settings, "BYBIT_SECRET_KEY", ""),
-                testnet=getattr(settings, "BYBIT_TESTNET", False),
-            )
-        except Exception as e:
-            logger.debug(f"Bybit service not available: {e}")
+        if self.is_crypto:
+            try:
+                from django.conf import settings
+                from trading.services import BybitDataService
+                self.bybit_service = BybitDataService(
+                    api_key=getattr(settings, "BYBIT_API_KEY", ""),
+                    secret_key=getattr(settings, "BYBIT_SECRET_KEY", ""),
+                    testnet=getattr(settings, "BYBIT_TESTNET", False),
+                )
+                logger.info(f"Symbol {self.ticker} identified as cryptocurrency, will use Bybit")
+            except Exception as e:
+                logger.warning(f"Bybit service not available for {self.ticker}: {e}")
+        else:
+            logger.info(f"Symbol {self.ticker} identified as stock, will use yfinance")
         
         logger.info(f"Initialized MarketMonitoringAgent for {self.ticker}")
     
@@ -187,11 +225,29 @@ class MarketMonitoringAgent:
                 self.raw_data = cached_data.copy()
                 return cached_data
         
-        # Retry mechanism
+        # Для криптовалют - сначала пробуем Bybit, потом yfinance как fallback
+        # Для акций - только yfinance
+        if self.is_crypto and self.bybit_service:
+            try:
+                logger.info(f"Fetching data from Bybit for {self.ticker} (cryptocurrency)")
+                bybit_data = self._fetch_from_bybit()
+                if bybit_data is not None and not bybit_data.empty:
+                    logger.info(f"Successfully loaded {len(bybit_data)} records from Bybit")
+                    # Save to cache
+                    if self.enable_cache:
+                        self._save_to_cache(bybit_data)
+                    self.raw_data = bybit_data.copy()
+                    return bybit_data
+                else:
+                    logger.warning(f"Bybit returned no data for {self.ticker}, trying yfinance as fallback")
+            except Exception as bybit_error:
+                logger.warning(f"Bybit failed for {self.ticker}: {str(bybit_error)}, trying yfinance as fallback")
+        
+        # Для акций или если Bybit не сработал - используем yfinance
         last_exception = None
         for attempt in range(self.max_retries):
             try:
-                logger.info(f"Loading data for {self.ticker} (period={self.period}, interval={self.interval}, attempt {attempt + 1})")
+                logger.info(f"Loading data from yfinance for {self.ticker} (period={self.period}, interval={self.interval}, attempt {attempt + 1})")
                 
                 # Задержка перед запросом для обхода rate limiting Yahoo Finance
                 if attempt > 0 or self.request_delay > 0:
@@ -237,12 +293,12 @@ class MarketMonitoringAgent:
                 # Save raw data
                 self.raw_data = data.copy()
                 
-                logger.info(f"Successfully loaded {len(data)} records")
+                logger.info(f"Successfully loaded {len(data)} records from yfinance")
                 return data
                 
             except Exception as e:
                 last_exception = e
-                logger.warning(f"Error loading data (attempt {attempt + 1}/{self.max_retries}): {str(e)}")
+                logger.warning(f"Error loading data from yfinance (attempt {attempt + 1}/{self.max_retries}): {str(e)}")
                 
                 if attempt < self.max_retries - 1:
                     # Увеличиваем задержку для обхода блокировки Yahoo Finance
@@ -251,21 +307,6 @@ class MarketMonitoringAgent:
                     wait_time = max(wait_time, 5.0)
                     logger.info(f"Waiting {wait_time:.1f} seconds before retry...")
                     time.sleep(wait_time)
-        
-        # If all yfinance attempts failed, try Bybit as fallback (для криптовалют)
-        if self.bybit_service:
-            try:
-                logger.info(f"yfinance failed, trying Bybit as fallback for {self.ticker}")
-                bybit_data = self._fetch_from_bybit()
-                if bybit_data is not None and not bybit_data.empty:
-                    logger.info(f"Successfully loaded {len(bybit_data)} records from Bybit")
-                    # Save to cache
-                    if self.enable_cache:
-                        self._save_to_cache(bybit_data)
-                    self.raw_data = bybit_data.copy()
-                    return bybit_data
-            except Exception as bybit_error:
-                logger.warning(f"Bybit fallback also failed: {str(bybit_error)}")
         
         # If all attempts failed, try loading from cache
         if self.enable_cache:
@@ -323,7 +364,7 @@ class MarketMonitoringAgent:
     
     def _fetch_from_bybit(self) -> Optional[pd.DataFrame]:
         """
-        Получает данные через Bybit API как fallback для yfinance.
+        Получает данные через Bybit API.
         Работает только для криптовалют.
         
         Returns:
@@ -332,13 +373,8 @@ class MarketMonitoringAgent:
         if not self.bybit_service:
             return None
         
-        # Проверяем, является ли символ криптовалютой
-        # Bybit работает только с криптовалютами
-        ticker_upper = self.ticker.upper()
-        is_crypto = any(suffix in ticker_upper for suffix in ["USDT", "USDC", "BTC", "ETH", "BNB", "BUSD", "-USD"])
-        
-        # Если не криптовалюта, пропускаем
-        if not is_crypto:
+        # Проверяем, является ли символ криптовалютой (уже определено при инициализации)
+        if not self.is_crypto:
             logger.debug(f"{self.ticker} is not a cryptocurrency, skipping Bybit")
             return None
         
