@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
+from decimal import Decimal
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -152,6 +153,19 @@ class MarketMonitoringAgent:
         # Настраиваем User-Agent заголовки для обхода блокировок Yahoo Finance
         _setup_yfinance_headers()
         
+        # Инициализируем Bybit сервис для fallback (если yfinance не работает)
+        self.bybit_service = None
+        try:
+            from django.conf import settings
+            from trading.services import BybitDataService
+            self.bybit_service = BybitDataService(
+                api_key=getattr(settings, "BYBIT_API_KEY", ""),
+                secret_key=getattr(settings, "BYBIT_SECRET_KEY", ""),
+                testnet=getattr(settings, "BYBIT_TESTNET", False),
+            )
+        except Exception as e:
+            logger.debug(f"Bybit service not available: {e}")
+        
         logger.info(f"Initialized MarketMonitoringAgent for {self.ticker}")
     
     def fetch_raw_data(self) -> pd.DataFrame:
@@ -238,6 +252,21 @@ class MarketMonitoringAgent:
                     logger.info(f"Waiting {wait_time:.1f} seconds before retry...")
                     time.sleep(wait_time)
         
+        # If all yfinance attempts failed, try Bybit as fallback (для криптовалют)
+        if self.bybit_service:
+            try:
+                logger.info(f"yfinance failed, trying Bybit as fallback for {self.ticker}")
+                bybit_data = self._fetch_from_bybit()
+                if bybit_data is not None and not bybit_data.empty:
+                    logger.info(f"Successfully loaded {len(bybit_data)} records from Bybit")
+                    # Save to cache
+                    if self.enable_cache:
+                        self._save_to_cache(bybit_data)
+                    self.raw_data = bybit_data.copy()
+                    return bybit_data
+            except Exception as bybit_error:
+                logger.warning(f"Bybit fallback also failed: {str(bybit_error)}")
+        
         # If all attempts failed, try loading from cache
         if self.enable_cache:
             cached_data = self._load_from_cache(ignore_ttl=True)
@@ -290,6 +319,102 @@ class MarketMonitoringAgent:
                 return data
         except Exception as e:
             logger.warning(f"Error loading from cache: {e}")
+            return None
+    
+    def _fetch_from_bybit(self) -> Optional[pd.DataFrame]:
+        """
+        Получает данные через Bybit API как fallback для yfinance.
+        Работает только для криптовалют.
+        
+        Returns:
+            DataFrame с колонками Open, High, Low, Close, Volume или None
+        """
+        if not self.bybit_service:
+            return None
+        
+        # Проверяем, является ли символ криптовалютой
+        # Bybit работает только с криптовалютами
+        ticker_upper = self.ticker.upper()
+        is_crypto = any(suffix in ticker_upper for suffix in ["USDT", "USDC", "BTC", "ETH", "BNB", "BUSD", "-USD"])
+        
+        # Если не криптовалюта, пропускаем
+        if not is_crypto:
+            logger.debug(f"{self.ticker} is not a cryptocurrency, skipping Bybit")
+            return None
+        
+        try:
+            # Нормализуем символ для Bybit
+            bybit_symbol = self.bybit_service.normalize_symbol(self.ticker)
+            
+            # Маппинг period в limit для Bybit
+            period_map = {
+                "1d": 1440,      # 1 день = 1440 минут
+                "5d": 7200,      # 5 дней
+                "1mo": 43200,    # ~30 дней = 43200 минут
+                "3mo": 129600,   # ~90 дней
+                "6mo": 259200,   # ~180 дней
+                "1y": 525600,    # ~365 дней
+            }
+            limit = period_map.get(self.period, 200)
+            
+            # Маппинг interval для Bybit
+            interval_map = {
+                "1m": "1",
+                "5m": "5",
+                "15m": "15",
+                "30m": "30",
+                "1h": "60",
+                "4h": "240",
+                "1d": "D",
+                "1w": "W",
+                "1mo": "M"
+            }
+            bybit_interval = interval_map.get(self.interval, "60")
+            
+            # Получаем исторические данные
+            historical_data = self.bybit_service.get_historical_data(
+                symbol=bybit_symbol,
+                category="spot",
+                interval=bybit_interval,
+                limit=min(limit, 200)  # Bybit максимум 200 свечей
+            )
+            
+            if not historical_data:
+                logger.warning(f"No data from Bybit for {bybit_symbol}")
+                return None
+            
+            # Преобразуем в DataFrame
+            df_data = []
+            for item in historical_data:
+                df_data.append({
+                    "Open": float(item["open"]),
+                    "High": float(item["high"]),
+                    "Low": float(item["low"]),
+                    "Close": float(item["close"]),
+                    "Volume": int(item["volume"]),
+                })
+            
+            if not df_data:
+                return None
+            
+            # Создаем DataFrame с индексом времени
+            df = pd.DataFrame(df_data)
+            timestamps = [item["timestamp"] for item in historical_data]
+            df.index = pd.to_datetime(timestamps)
+            
+            # Сортируем по времени (от старых к новым)
+            df = df.sort_index()
+            
+            # Проверяем валидность
+            if not self.validate_dataframe(df):
+                logger.warning(f"Bybit data validation failed for {bybit_symbol}")
+                return None
+            
+            logger.info(f"Successfully fetched {len(df)} records from Bybit for {bybit_symbol}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching data from Bybit: {str(e)}", exc_info=True)
             return None
     
     def _save_to_cache(self, data: pd.DataFrame) -> None:
