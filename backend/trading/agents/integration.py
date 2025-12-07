@@ -269,29 +269,9 @@ class DecisionAgentIntegration:
             # Принимаем решение
             ai_decision = decision_agent.receive_market_data(market_message)
             
-            # ВАЖНО: Проверяем открытые позиции перед SELL
-            # Если нет открытых позиций, нельзя продавать - меняем на HOLD
-            if ai_decision.get("action") == "SELL":
-                from trading.models import Position
-                open_positions = Position.objects.filter(
-                    user=self.user,
-                    symbol=symbol,
-                    is_open=True
-                ).exists()
-                
-                if not open_positions:
-                    logger.info(f"No open positions for {symbol.symbol}, changing SELL to HOLD")
-                    ai_decision = {
-                        "action": "HOLD",
-                        "ticker": symbol.symbol,
-                        "confidence": 0.5,
-                        "reasoning": "HOLD: No open positions to sell",
-                        "quantity": 0,
-                        "price": market_message.get("ohlcv", {}).get("close", 0.0),
-                        "timestamp": timezone.now().isoformat() + "Z",
-                        "risk_score": 0.0,
-                        "model_type": ai_decision.get("model_type", "rule_based")
-                    }
+            # ПРИМЕЧАНИЕ: Для симуляции разрешаем SELL даже без открытых позиций
+            # Это ускоряет сбор данных для обучения модели
+            # В реальной торговле здесь была бы проверка на открытые позиции
             
             # Сохраняем решение в БД
             decision = TradingDecision.objects.create(
@@ -457,11 +437,39 @@ class ExecutionAgentIntegration:
                     account.free_cash += revenue
                     account.save()
                 else:
-                    error_msg = f"Cannot sell {quantity} {symbol.symbol}: insufficient position"
-                    self.adapter.log("warning", error_msg)
-                    # Помечаем сделку как отклоненную
-                    trade.delete()  # Удаляем сделку, т.к. она не была выполнена
-                    return None
+                    # НЕТ открытой позиции - разрешаем SELL для симуляции
+                    # Это ускоряет сбор данных для обучения модели
+                    # Создаем "виртуальную" позицию для расчета PnL
+                    # Используем среднюю цену за последние N сделок как entry_price
+                    from trading.models import Trade as TradeModel
+                    recent_buys = TradeModel.objects.filter(
+                        user=self.user,
+                        symbol=symbol,
+                        action="BUY"
+                    ).order_by('-executed_at')[:5]
+                    
+                    if recent_buys.exists():
+                        # Используем среднюю цену последних покупок
+                        avg_entry_price = sum(float(t.price) for t in recent_buys) / len(recent_buys)
+                    else:
+                        # Если нет истории покупок, используем текущую цену (PnL будет 0)
+                        avg_entry_price = float(executed_price)
+                    
+                    # Рассчитываем PnL как если бы была позиция
+                    pnl = (executed_price - Decimal(str(avg_entry_price))) * quantity
+                    trade.pnl = pnl
+                    trade.save()
+                    
+                    # Обновляем счет (добавляем средства от продажи)
+                    revenue = quantity * executed_price
+                    account.balance += revenue
+                    account.free_cash += revenue
+                    account.save()
+                    
+                    logger.info(
+                        f"Simulated SELL without position: {quantity} {symbol.symbol} @ {executed_price}, "
+                        f"virtual entry: {avg_entry_price:.2f}, PnL: {pnl:.2f}"
+                    )
             
             # Отправляем отчет
             self.adapter.send_message(

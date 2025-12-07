@@ -183,31 +183,9 @@ class DecisionMakingAgent:
             # Apply risk management
             decision = self._apply_risk_management(decision, market_data)
             
-            # ВАЖНО: Проверяем открытые позиции перед SELL
-            # Если нет открытых позиций, нельзя продавать - меняем на HOLD
-            if decision.get("action") == "SELL" and self.user_id:
-                try:
-                    from trading.models import Position
-                    from django.contrib.auth import get_user_model
-                    User = get_user_model()
-                    user = User.objects.get(id=self.user_id)
-                    ticker = decision.get("ticker", "UNKNOWN")
-                    
-                    # Проверяем, есть ли открытые позиции для этого символа
-                    open_positions = Position.objects.filter(
-                        user=user,
-                        symbol__symbol=ticker,
-                        is_open=True
-                    ).exists()
-                    
-                    if not open_positions:
-                        logger.info(f"No open positions for {ticker}, changing SELL to HOLD")
-                        decision = self._create_hold_decision(
-                            market_data,
-                            "No open positions to sell"
-                        )
-                except Exception as e:
-                    logger.debug(f"Could not check positions: {e}, allowing SELL decision")
+            # ПРИМЕЧАНИЕ: Для симуляции разрешаем SELL даже без открытых позиций
+            # Это ускоряет сбор данных для обучения модели
+            # Проверка на открытые позиции убрана - ExecutionAgent обработает SELL в любом случае
             
             # Store in history
             self.decision_history.append({
