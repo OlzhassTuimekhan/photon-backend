@@ -4,6 +4,7 @@
 Проверяет, может ли yfinance получать данные с Yahoo Finance
 """
 import sys
+import requests
 from django.core.management.base import BaseCommand
 
 try:
@@ -11,6 +12,38 @@ try:
     YFINANCE_AVAILABLE = True
 except ImportError:
     YFINANCE_AVAILABLE = False
+
+# Настройка User-Agent для обхода блокировок
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+def _setup_yfinance_headers():
+    """Настраивает заголовки для yfinance запросов"""
+    original_get = requests.get
+    original_post = requests.post
+    
+    def patched_get(url, **kwargs):
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
+        kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
+        return original_get(url, **kwargs)
+    
+    def patched_post(url, **kwargs):
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
+        kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
+        return original_post(url, **kwargs)
+    
+    if not hasattr(requests, '_yfinance_patched'):
+        requests.get = patched_get
+        requests.post = patched_post
+        requests._yfinance_patched = True
 
 
 class Command(BaseCommand):
@@ -37,7 +70,11 @@ class Command(BaseCommand):
             self.stdout.write("Установите: pip install yfinance")
             return
         
-        self.stdout.write("✓ yfinance установлен\n")
+        self.stdout.write("✓ yfinance установлен")
+        
+        # Настраиваем User-Agent заголовки
+        _setup_yfinance_headers()
+        self.stdout.write("✓ User-Agent заголовки настроены\n")
         
         # Тест 1: Базовое получение тикера
         self.stdout.write("[1/4] Создание тикера...")

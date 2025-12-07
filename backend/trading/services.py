@@ -16,6 +16,42 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Настройка User-Agent для обхода блокировок Yahoo Finance
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+def _setup_yfinance_headers():
+    """Настраивает заголовки для yfinance запросов"""
+    original_get = requests.get
+    original_post = requests.post
+    
+    def patched_get(url, **kwargs):
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
+        kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
+        return original_get(url, **kwargs)
+    
+    def patched_post(url, **kwargs):
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
+        kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
+        return original_post(url, **kwargs)
+    
+    if not hasattr(requests, '_yfinance_patched'):
+        requests.get = patched_get
+        requests.post = patched_post
+        requests._yfinance_patched = True
+        logger.debug("User-Agent headers configured for yfinance in services")
+
+# Настраиваем заголовки при импорте модуля
+_setup_yfinance_headers()
+
 
 class BybitDataService:
     """Сервис для получения данных рынка через Bybit API"""

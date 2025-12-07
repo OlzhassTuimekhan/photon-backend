@@ -20,9 +20,67 @@ from collections import deque
 from datetime import datetime, timedelta
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Настройка User-Agent для обхода блокировок Yahoo Finance
+# Имитируем реальный браузер
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+def _setup_yfinance_headers():
+    """
+    Настраивает заголовки для yfinance запросов.
+    Имитирует реальный браузер для обхода блокировок Yahoo Finance.
+    """
+    # Настраиваем User-Agent для requests (yfinance использует requests под капотом)
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": _DEFAULT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
+    })
+    
+    # Monkey-patch для yfinance - заменяем дефолтную сессию
+    # yfinance использует requests.get/post, поэтому настраиваем глобально
+    original_get = requests.get
+    original_post = requests.post
+    
+    def patched_get(url, **kwargs):
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
+        kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
+        return original_get(url, **kwargs)
+    
+    def patched_post(url, **kwargs):
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+        kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
+        kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
+        return original_post(url, **kwargs)
+    
+    # Применяем патч только если еще не применен
+    if not hasattr(requests, '_yfinance_patched'):
+        requests.get = patched_get
+        requests.post = patched_post
+        requests._yfinance_patched = True
+        logger.debug("User-Agent headers configured for yfinance")
+    
+    return session
 
 
 class MarketMonitoringAgent:
@@ -90,6 +148,9 @@ class MarketMonitoringAgent:
         # Create cache directory if needed
         if self.enable_cache and not os.path.exists(self.cache_path):
             os.makedirs(self.cache_path, exist_ok=True)
+        
+        # Настраиваем User-Agent заголовки для обхода блокировок Yahoo Finance
+        _setup_yfinance_headers()
         
         logger.info(f"Initialized MarketMonitoringAgent for {self.ticker}")
     
