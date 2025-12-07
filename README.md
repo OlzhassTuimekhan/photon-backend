@@ -204,9 +204,28 @@ curl -X POST http://localhost:666/api/trading/agents/decision-maker/ \
 - Система автоматически определяет источник данных:
   - **yfinance** для акций (AAPL, TSLA, MSFT и т.д.)
   - **Bybit API** для криптовалют (BTC, ETH, BTCUSDT и т.д.)
+  - **CSV файлы** для backtest (автоматически ищет в `./data/`)
 - Реальные сделки **не выполняются** - система только принимает решения
-- AI модель пока не реализована - решения возвращают заглушку "HOLD"
+- AI модель использует ML (Random Forest, Gradient Boosting)
 - API ключи Bybit **не обязательны** для публичных данных
+- **yfinance может блокироваться** - используйте CSV файлы для backtest (см. `backend/DATA_SOURCES.md`)
+
+## Решение проблем с yfinance
+
+Если yfinance блокируется или дает таймауты:
+
+1. **Скачайте данные в CSV:**
+   ```bash
+   docker compose exec backend python manage.py download_historical_data \
+     --symbol AAPL --period 1y --interval 1h
+   ```
+
+2. **Используйте CSV файлы для backtest:**
+   - Положите CSV в `./data/` или `./backend/data/`
+   - Формат: `{SYMBOL}.csv` или `{SYMBOL}_{INTERVAL}.csv`
+   - Backtest автоматически найдет файл
+
+Подробнее: `backend/DATA_SOURCES.md`
 
 ## Источники данных
 

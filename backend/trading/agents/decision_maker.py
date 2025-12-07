@@ -504,10 +504,15 @@ class DecisionMakingAgent:
             try:
                 logger.info("Attempting to train on real historical data...")
                 X, y = self._prepare_historical_training_data()
-                if X is not None and len(X) > 100:  # Need at least 100 samples
+                # Уменьшено минимальное требование для малого количества данных (например, Bybit 200 свечек)
+                min_samples = 30  # Минимум 30 samples вместо 100
+                if X is not None and len(X) >= min_samples:
                     logger.info(f"Using {len(X)} historical samples for training")
+                    # Если данных мало, используем меньше деревьев и меньшую глубину
+                    if len(X) < 100:
+                        logger.info(f"Small dataset ({len(X)} samples), using reduced model complexity")
                 else:
-                    logger.warning("Not enough historical data, falling back to synthetic data")
+                    logger.warning(f"Not enough historical data ({len(X) if X is not None else 0} samples, need {min_samples}), falling back to synthetic data")
                     X, y = self._prepare_synthetic_training_data()
             except Exception as e:
                 logger.warning(f"Error preparing historical data: {e}. Using synthetic data.")
@@ -516,22 +521,59 @@ class DecisionMakingAgent:
             logger.info("Using synthetic training data")
             X, y = self._prepare_synthetic_training_data()
         
+        # Для малого количества данных используем меньший test_size
+        test_size = 0.2 if len(X) > 50 else 0.1  # Меньший test_size для малых датасетов
+        
         # Split data
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        if len(X) > 10:
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+        else:
+            # Если данных очень мало, используем все для обучения
+            logger.warning(f"Very small dataset ({len(X)} samples), using all data for training")
+            X_train, X_test, y_train, y_test = X, X, y, y
         
         # Scale features
         if self.scaler is None:
             raise ValueError("Scaler not initialized - sklearn not available")
         X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
+        X_test_scaled = self.scaler.transform(X_test) if len(X_test) > 0 else X_train_scaled
         
-        # Train model
-        if self.model_type == "random_forest":
-            self.model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10)
-        elif self.model_type == "gradient_boosting":
-            self.model = GradientBoostingClassifier(n_estimators=100, random_state=42, max_depth=5)
+        # Train model - адаптируем параметры под размер данных
+        n_samples = len(X_train)
+        if n_samples < 50:
+            # Очень мало данных - простая модель
+            n_estimators = 20
+            max_depth = 3
+        elif n_samples < 100:
+            # Мало данных - средняя модель
+            n_estimators = 50
+            max_depth = 5
         else:
-            self.model = RandomForestClassifier(n_estimators=100, random_state=42)
+            # Достаточно данных - полная модель
+            n_estimators = 100
+            max_depth = 10
+        
+        if self.model_type == "random_forest":
+            self.model = RandomForestClassifier(
+                n_estimators=n_estimators, 
+                random_state=42, 
+                max_depth=max_depth,
+                min_samples_split=2,  # Минимум для малых датасетов
+                min_samples_leaf=1
+            )
+        elif self.model_type == "gradient_boosting":
+            self.model = GradientBoostingClassifier(
+                n_estimators=n_estimators, 
+                random_state=42, 
+                max_depth=max_depth,
+                learning_rate=0.1 if n_samples >= 100 else 0.2  # Больше learning rate для малых датасетов
+            )
+        else:
+            self.model = RandomForestClassifier(
+                n_estimators=n_estimators, 
+                random_state=42,
+                max_depth=max_depth
+            )
         
         self.model.fit(X_train_scaled, y_train)
         
@@ -577,8 +619,9 @@ class DecisionMakingAgent:
             # Get processed data with indicators
             data = market_agent.get_processed_data(analyze=False)
             
-            if data.empty or len(data) < 50:
-                logger.warning(f"Insufficient historical data: {len(data)} records")
+            # Уменьшено минимальное требование для малого количества данных
+            if data.empty or len(data) < 20:
+                logger.warning(f"Insufficient historical data: {len(data)} records (need at least 20)")
                 return None, None
             
             # Prepare features and labels

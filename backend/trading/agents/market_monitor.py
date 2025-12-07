@@ -312,6 +312,7 @@ class MarketMonitoringAgent:
         """
         Fetches raw OHLCV data from market via Yahoo Finance API.
         Uses retry mechanism and caching.
+        Also supports loading from CSV files for backtesting.
         
         Returns:
             DataFrame with columns: Open, High, Low, Close, Volume
@@ -319,6 +320,13 @@ class MarketMonitoringAgent:
         Raises:
             Exception: If failed to get data after all attempts
         """
+        # Сначала пробуем загрузить из CSV файла (для backtest)
+        csv_data = self._load_from_csv_file()
+        if csv_data is not None and not csv_data.empty:
+            logger.info(f"Loaded data from CSV file for {self.ticker}")
+            self.raw_data = csv_data.copy()
+            return csv_data
+        
         # Check cache
         if self.enable_cache:
             cached_data = self._load_from_cache()
@@ -435,27 +443,96 @@ class MarketMonitoringAgent:
                 
             except Exception as e:
                 last_exception = e
-                logger.warning(f"Error loading data from yfinance (attempt {attempt + 1}/{self.max_retries}): {str(e)}")
+                error_msg = str(e).lower()
+                # Проверяем на типичные ошибки блокировки
+                if any(keyword in error_msg for keyword in ['timeout', 'timed out', 'connection', 'blocked', '429', 'rate limit']):
+                    logger.warning(f"yfinance appears to be blocked/timing out (attempt {attempt + 1}/{self.max_retries}): {str(e)}")
+                else:
+                    logger.warning(f"Error loading data from yfinance (attempt {attempt + 1}/{self.max_retries}): {str(e)}")
                 
                 if attempt < self.max_retries - 1:
                     # Увеличиваем задержку для обхода блокировки Yahoo Finance
                     wait_time = self.backoff_factor ** attempt
-                    # Минимум 5 секунд между попытками для серверных запросов
-                    wait_time = max(wait_time, 5.0)
+                    # Минимум 10 секунд между попытками для серверных запросов (увеличено)
+                    wait_time = max(wait_time, 10.0)
                     logger.info(f"Waiting {wait_time:.1f} seconds before retry...")
                     time.sleep(wait_time)
         
-        # If all attempts failed, try loading from cache
+        # If all attempts failed, try loading from cache (even stale)
+        logger.warning(f"All yfinance attempts failed, trying to load from cache...")
         if self.enable_cache:
             cached_data = self._load_from_cache(ignore_ttl=True)
             if cached_data is not None:
-                logger.warning(f"Using stale data from cache for {self.ticker}")
+                logger.warning(f"Using stale data from cache for {self.ticker} (yfinance failed)")
                 self.raw_data = cached_data.copy()
                 return cached_data
         
+        # Пробуем еще раз загрузить из CSV файла
+        csv_data = self._load_from_csv_file()
+        if csv_data is not None and not csv_data.empty:
+            logger.warning(f"Using CSV file data for {self.ticker} (yfinance failed)")
+            self.raw_data = csv_data.copy()
+            return csv_data
+        
         # If nothing helped, raise exception
-        logger.error(f"Failed to load data for {self.ticker} after {self.max_retries} attempts")
-        raise last_exception or Exception(f"Failed to get data for ticker {self.ticker}")
+        logger.error(f"Failed to load data for {self.ticker} after {self.max_retries} attempts and all fallbacks")
+        raise last_exception or Exception(f"Failed to get data for ticker {self.ticker}. yfinance blocked or unavailable. Try using CSV file in ./data/{self.ticker}.csv")
+    
+    def _load_from_csv_file(self) -> Optional[pd.DataFrame]:
+        """
+        Загружает данные из CSV файла для backtest.
+        Ищет файлы в формате: {ticker}.csv или {ticker}_{interval}.csv в директории ./data/
+        """
+        # Возможные пути к файлам данных
+        data_dirs = ["./data", "./backend/data", "../data", os.path.join(self.cache_path, "data")]
+        
+        # Возможные имена файлов
+        possible_names = [
+            f"{self.ticker}.csv",
+            f"{self.ticker}_{self.interval}.csv",
+            f"{self.ticker.upper()}.csv",
+            f"{self.ticker.upper()}_{self.interval}.csv",
+        ]
+        
+        for data_dir in data_dirs:
+            if not os.path.exists(data_dir):
+                continue
+                
+            for filename in possible_names:
+                filepath = os.path.join(data_dir, filename)
+                if os.path.exists(filepath):
+                    try:
+                        logger.info(f"Loading data from CSV file: {filepath}")
+                        # Пробуем разные форматы CSV
+                        data = pd.read_csv(filepath, index_col=0, parse_dates=True)
+                        
+                        # Проверяем наличие нужных колонок
+                        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+                        # Проверяем и нижний регистр
+                        required_cols_lower = [c.lower() for c in required_cols]
+                        
+                        # Если колонки в нижнем регистре, переименовываем
+                        if all(col.lower() in data.columns.str.lower() for col in required_cols):
+                            # Находим правильные имена колонок
+                            col_mapping = {}
+                            for req_col in required_cols:
+                                for actual_col in data.columns:
+                                    if actual_col.lower() == req_col.lower():
+                                        col_mapping[actual_col] = req_col
+                                        break
+                            data = data.rename(columns=col_mapping)
+                        
+                        # Проверяем валидность
+                        if self.validate_dataframe(data):
+                            logger.info(f"Successfully loaded {len(data)} records from CSV file")
+                            return data
+                        else:
+                            logger.warning(f"CSV file {filepath} failed validation")
+                    except Exception as e:
+                        logger.debug(f"Error loading CSV file {filepath}: {e}")
+                        continue
+        
+        return None
     
     def _load_from_cache(self, ignore_ttl: bool = False) -> Optional[pd.DataFrame]:
         """Loads data from cache."""
