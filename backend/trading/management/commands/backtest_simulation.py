@@ -211,7 +211,7 @@ class Command(BaseCommand):
         decision_agent = DecisionMakingAgent(
             model_type="random_forest",
             risk_tolerance="medium",
-            min_confidence=0.35,  # Низкий порог для сбора данных
+            min_confidence=0.25,  # Очень низкий порог для симуляции (чтобы модель делала больше сделок)
             enable_ai=True,
             use_historical_training=True,
             training_ticker=symbol_code,
@@ -276,10 +276,23 @@ class Command(BaseCommand):
                     )
                     last_display_time = current_time
                 
+                # Конвертируем timestamp в aware datetime (с timezone) для Django
+                if pd.api.types.is_datetime64_any_dtype(type(timestamp)):
+                    # Если timestamp naive, добавляем UTC timezone
+                    if timestamp.tzinfo is None:
+                        timestamp_aware = timestamp.replace(tzinfo=tz.utc)
+                    else:
+                        timestamp_aware = timestamp
+                else:
+                    # Если не datetime, конвертируем
+                    timestamp_aware = pd.to_datetime(timestamp)
+                    if timestamp_aware.tzinfo is None:
+                        timestamp_aware = timestamp_aware.replace(tzinfo=tz.utc)
+                
                 # Подготовка данных рынка
                 # После preprocess колонки в нижнем регистре (open, close, а не Open, Close)
                 market_message = {
-                    "timestamp": timestamp.isoformat() + "Z",
+                    "timestamp": timestamp_aware.isoformat(),
                     "ticker": symbol_code,
                     "ohlcv": {
                         "open": float(row.get("open", row.get("Open", 0))),
@@ -307,14 +320,15 @@ class Command(BaseCommand):
                     },
                     "meta": {
                         "source": "historical_backtest",
-                        "timestamp": timestamp.isoformat(),
+                        "timestamp": timestamp_aware.isoformat(),
                     }
                 }
                 
                 # Создаем MarketData для БД (для совместимости)
+                # Используем aware datetime для избежания предупреждений
                 market_data_obj, _ = MarketData.objects.get_or_create(
                     symbol=symbol,
-                    timestamp=timestamp,
+                    timestamp=timestamp_aware,
                     defaults={
                         "price": Decimal(str(market_message["ohlcv"]["close"])),
                         "volume": int(market_message["ohlcv"]["volume"]),
@@ -351,7 +365,7 @@ class Command(BaseCommand):
                             "quantity": decision.metadata.get("quantity", 1),
                             "price": decision.metadata.get("price", float(market_data_obj.price)),
                             "confidence": float(decision.confidence / 100) if decision.confidence else 0.5,
-                            "timestamp": timestamp.isoformat(),
+                            "timestamp": timestamp_aware.isoformat(),
                             "reasoning": decision.reasoning,
                         }
                         
