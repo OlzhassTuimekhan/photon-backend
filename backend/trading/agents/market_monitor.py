@@ -95,7 +95,27 @@ def _setup_yfinance_headers():
         kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
         kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
-        return original_get(url, **kwargs)
+        
+        # Детальное логирование запроса
+        logger.info(f"[yfinance] GET request to: {url}")
+        logger.debug(f"[yfinance] Headers: {kwargs.get('headers', {})}")
+        
+        try:
+            response = original_get(url, **kwargs)
+            logger.info(f"[yfinance] Response status: {response.status_code}")
+            logger.debug(f"[yfinance] Response headers: {dict(response.headers)}")
+            
+            # Логируем первые 500 символов ответа для диагностики
+            try:
+                content_preview = response.text[:500] if response.text else "(empty)"
+                logger.debug(f"[yfinance] Response preview: {content_preview}")
+            except Exception:
+                logger.debug(f"[yfinance] Response content length: {len(response.content) if response.content else 0} bytes")
+            
+            return response
+        except Exception as e:
+            logger.error(f"[yfinance] GET request failed: {e}", exc_info=True)
+            raise
     
     def patched_post(url, **kwargs):
         if "headers" not in kwargs:
@@ -103,14 +123,34 @@ def _setup_yfinance_headers():
         kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
         kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
-        return original_post(url, **kwargs)
+        
+        # Детальное логирование запроса
+        logger.info(f"[yfinance] POST request to: {url}")
+        logger.debug(f"[yfinance] Headers: {kwargs.get('headers', {})}")
+        
+        try:
+            response = original_post(url, **kwargs)
+            logger.info(f"[yfinance] Response status: {response.status_code}")
+            logger.debug(f"[yfinance] Response headers: {dict(response.headers)}")
+            
+            # Логируем первые 500 символов ответа для диагностики
+            try:
+                content_preview = response.text[:500] if response.text else "(empty)"
+                logger.debug(f"[yfinance] Response preview: {content_preview}")
+            except Exception:
+                logger.debug(f"[yfinance] Response content length: {len(response.content) if response.content else 0} bytes")
+            
+            return response
+        except Exception as e:
+            logger.error(f"[yfinance] POST request failed: {e}", exc_info=True)
+            raise
     
     # Применяем патч только если еще не применен
     if not hasattr(requests, '_yfinance_patched'):
         requests.get = patched_get
         requests.post = patched_post
         requests._yfinance_patched = True
-        logger.debug("User-Agent headers configured for yfinance")
+        logger.info("User-Agent headers configured for yfinance with detailed logging")
     
     return session
 
@@ -251,17 +291,27 @@ class MarketMonitoringAgent:
                 
                 # Задержка перед запросом для обхода rate limiting Yahoo Finance
                 if attempt > 0 or self.request_delay > 0:
+                    logger.info(f"[yfinance] Waiting {self.request_delay} seconds before request...")
                     time.sleep(self.request_delay)
                 
+                # Детальное логирование перед запросом
+                logger.info(f"[yfinance] Starting download: ticker={self.ticker}, period={self.period}, interval={self.interval}")
+                logger.debug(f"[yfinance] Request parameters: timeout=30, auto_adjust=False, progress=False")
+                
                 # Load data via yfinance
-                data = yf.download(
-                    tickers=self.ticker,
-                    period=self.period,
-                    interval=self.interval,
-                    progress=False,
-                    auto_adjust=False,
-                    timeout=30  # Увеличиваем таймаут
-                )
+                try:
+                    data = yf.download(
+                        tickers=self.ticker,
+                        period=self.period,
+                        interval=self.interval,
+                        progress=False,
+                        auto_adjust=False,
+                        timeout=30  # Увеличиваем таймаут
+                    )
+                    logger.info(f"[yfinance] Download completed, received DataFrame with shape: {data.shape if not data.empty else 'EMPTY'}")
+                except Exception as download_error:
+                    logger.error(f"[yfinance] Download failed with error: {download_error}", exc_info=True)
+                    raise
                 
                 # Check for empty data
                 if data.empty:

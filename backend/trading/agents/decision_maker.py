@@ -52,7 +52,8 @@ class DecisionMakingAgent:
         use_historical_training: bool = True,  # Use real historical data for training
         training_ticker: Optional[str] = None,  # Ticker for historical training
         training_period: str = "1y",  # Period for historical training data
-        user_id: Optional[int] = None  # ID пользователя для доступа к БД для обучения
+        user_id: Optional[int] = None,  # ID пользователя для доступа к БД для обучения
+        enable_continuous_learning: bool = True  # Включить постоянное обучение
     ):
         """
         Initialize decision-making agent.
@@ -87,7 +88,7 @@ class DecisionMakingAgent:
         self.is_trained = False
         
         # Continuous learning settings
-        self.enable_continuous_learning = True  # Включить постоянное обучение
+        self.enable_continuous_learning = enable_continuous_learning  # Включить постоянное обучение
         self.retrain_interval = 10  # Переобучать каждые N новых решений
         self.retrain_min_samples = 50  # Минимум новых samples для переобучения
         self.decisions_since_retrain = 0  # Счетчик решений с последнего переобучения

@@ -211,12 +211,13 @@ class Command(BaseCommand):
         decision_agent = DecisionMakingAgent(
             model_type="random_forest",
             risk_tolerance="medium",
-            min_confidence=0.25,  # Очень низкий порог для симуляции (чтобы модель делала больше сделок)
+            min_confidence=0.15,  # Очень низкий порог для симуляции (чтобы модель делала больше сделок)
             enable_ai=True,
             use_historical_training=True,
             training_ticker=symbol_code,
             training_period="1mo",
-            user_id=user.id
+            user_id=user.id,
+            enable_continuous_learning=False  # Отключаем переобучение в симуляции для уменьшения логов
         )
         
         execution_agent = ExecutionAgent(
