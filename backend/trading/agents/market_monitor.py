@@ -68,91 +68,153 @@ def _setup_yfinance_headers():
     """
     Настраивает заголовки для yfinance запросов.
     Имитирует реальный браузер для обхода блокировок Yahoo Finance.
+    
+    ВАЖНО: yfinance может использовать как requests, так и urllib напрямую.
+    Патчим оба варианта для максимальной совместимости.
     """
-    # Настраиваем User-Agent для requests (yfinance использует requests под капотом)
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": _DEFAULT_USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
-    })
-    
-    # Monkey-patch для yfinance - заменяем дефолтную сессию
-    # yfinance использует requests.get/post, поэтому настраиваем глобально
-    original_get = requests.get
-    original_post = requests.post
-    
-    def patched_get(url, **kwargs):
-        if "headers" not in kwargs:
-            kwargs["headers"] = {}
-        kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
-        kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
-        
-        # Детальное логирование запроса
-        logger.info(f"[yfinance] GET request to: {url}")
-        logger.debug(f"[yfinance] Headers: {kwargs.get('headers', {})}")
-        
-        try:
-            response = original_get(url, **kwargs)
-            logger.info(f"[yfinance] Response status: {response.status_code}")
-            logger.debug(f"[yfinance] Response headers: {dict(response.headers)}")
-            
-            # Логируем первые 500 символов ответа для диагностики
-            try:
-                content_preview = response.text[:500] if response.text else "(empty)"
-                logger.debug(f"[yfinance] Response preview: {content_preview}")
-            except Exception:
-                logger.debug(f"[yfinance] Response content length: {len(response.content) if response.content else 0} bytes")
-            
-            return response
-        except Exception as e:
-            logger.error(f"[yfinance] GET request failed: {e}", exc_info=True)
-            raise
-    
-    def patched_post(url, **kwargs):
-        if "headers" not in kwargs:
-            kwargs["headers"] = {}
-        kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
-        kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
-        
-        # Детальное логирование запроса
-        logger.info(f"[yfinance] POST request to: {url}")
-        logger.debug(f"[yfinance] Headers: {kwargs.get('headers', {})}")
-        
-        try:
-            response = original_post(url, **kwargs)
-            logger.info(f"[yfinance] Response status: {response.status_code}")
-            logger.debug(f"[yfinance] Response headers: {dict(response.headers)}")
-            
-            # Логируем первые 500 символов ответа для диагностики
-            try:
-                content_preview = response.text[:500] if response.text else "(empty)"
-                logger.debug(f"[yfinance] Response preview: {content_preview}")
-            except Exception:
-                logger.debug(f"[yfinance] Response content length: {len(response.content) if response.content else 0} bytes")
-            
-            return response
-        except Exception as e:
-            logger.error(f"[yfinance] POST request failed: {e}", exc_info=True)
-            raise
-    
-    # Применяем патч только если еще не применен
+    # Патч для requests (если yfinance использует requests)
     if not hasattr(requests, '_yfinance_patched'):
+        original_get = requests.get
+        original_post = requests.post
+        
+        def patched_get(url, **kwargs):
+            if "headers" not in kwargs:
+                kwargs["headers"] = {}
+            kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
+            kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
+            
+            # Детальное логирование запроса
+            logger.info(f"[yfinance] GET request to: {url}")
+            logger.debug(f"[yfinance] Headers: {kwargs.get('headers', {})}")
+            
+            try:
+                response = original_get(url, **kwargs)
+                logger.info(f"[yfinance] Response status: {response.status_code}")
+                logger.debug(f"[yfinance] Response headers: {dict(response.headers)}")
+                
+                # Логируем первые 500 символов ответа для диагностики
+                try:
+                    content_preview = response.text[:500] if response.text else "(empty)"
+                    logger.debug(f"[yfinance] Response preview: {content_preview}")
+                except Exception:
+                    logger.debug(f"[yfinance] Response content length: {len(response.content) if response.content else 0} bytes")
+                
+                return response
+            except Exception as e:
+                logger.error(f"[yfinance] GET request failed: {e}", exc_info=True)
+                raise
+        
+        def patched_post(url, **kwargs):
+            if "headers" not in kwargs:
+                kwargs["headers"] = {}
+            kwargs["headers"].setdefault("User-Agent", _DEFAULT_USER_AGENT)
+            kwargs["headers"].setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            kwargs["headers"].setdefault("Accept-Language", "en-US,en;q=0.5")
+            
+            # Детальное логирование запроса
+            logger.info(f"[yfinance] POST request to: {url}")
+            logger.debug(f"[yfinance] Headers: {kwargs.get('headers', {})}")
+            
+            try:
+                response = original_post(url, **kwargs)
+                logger.info(f"[yfinance] Response status: {response.status_code}")
+                logger.debug(f"[yfinance] Response headers: {dict(response.headers)}")
+                
+                # Логируем первые 500 символов ответа для диагностики
+                try:
+                    content_preview = response.text[:500] if response.text else "(empty)"
+                    logger.debug(f"[yfinance] Response preview: {content_preview}")
+                except Exception:
+                    logger.debug(f"[yfinance] Response content length: {len(response.content) if response.content else 0} bytes")
+                
+                return response
+            except Exception as e:
+                logger.error(f"[yfinance] POST request failed: {e}", exc_info=True)
+                raise
+        
         requests.get = patched_get
         requests.post = patched_post
         requests._yfinance_patched = True
-        logger.info("User-Agent headers configured for yfinance with detailed logging")
+        logger.info("Patched requests.get/post for yfinance with detailed logging")
     
-    return session
+    # Патч для urllib (yfinance может использовать urllib напрямую)
+    try:
+        import urllib.request
+        if not hasattr(urllib.request, '_yfinance_patched'):
+            original_urlopen = urllib.request.urlopen
+            original_build_opener = urllib.request.build_opener
+            
+            def patched_urlopen(url, data=None, timeout=None, *, cafile=None, capath=None, cadefault=False, context=None):
+                # Создаем запрос с правильными заголовками
+                if isinstance(url, str):
+                    req = urllib.request.Request(url)
+                else:
+                    req = url
+                
+                # Добавляем заголовки если их нет
+                if not req.has_header('User-Agent'):
+                    req.add_header('User-Agent', _DEFAULT_USER_AGENT)
+                if not req.has_header('Accept'):
+                    req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+                if not req.has_header('Accept-Language'):
+                    req.add_header('Accept-Language', 'en-US,en;q=0.5')
+                
+                # Логирование
+                full_url = req.full_url if hasattr(req, 'full_url') else str(url)
+                logger.info(f"[yfinance] urllib.urlopen to: {full_url}")
+                
+                try:
+                    response = original_urlopen(req, data, timeout, cafile=cafile, capath=capath, cadefault=cadefault, context=context)
+                    logger.info(f"[yfinance] urllib response status: {response.status if hasattr(response, 'status') else 'N/A'}")
+                    logger.debug(f"[yfinance] urllib response headers: {dict(response.headers) if hasattr(response, 'headers') else 'N/A'}")
+                    return response
+                except Exception as e:
+                    logger.error(f"[yfinance] urllib.urlopen failed: {e}", exc_info=True)
+                    raise
+            
+            urllib.request.urlopen = patched_urlopen
+            urllib.request._yfinance_patched = True
+            logger.info("Patched urllib.request.urlopen for yfinance with detailed logging")
+    except ImportError:
+        logger.debug("urllib.request not available, skipping urllib patch")
+    
+    # Также патчим yfinance напрямую через его внутренний механизм
+    try:
+        # yfinance использует yf.utils.get_json для получения данных
+        # Попробуем патчить на уровне yfinance
+        import yfinance.utils as yf_utils
+        if hasattr(yf_utils, 'get_json'):
+            original_get_json = yf_utils.get_json
+            
+            def patched_get_json(url, user_agent_headers=None, params=None, proxy=None, timeout=30):
+                logger.info(f"[yfinance] get_json called with URL: {url}")
+                logger.debug(f"[yfinance] get_json params: {params}")
+                
+                # Убеждаемся, что заголовки установлены
+                if user_agent_headers is None:
+                    user_agent_headers = {
+                        'User-Agent': _DEFAULT_USER_AGENT,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5'
+                    }
+                
+                try:
+                    result = original_get_json(url, user_agent_headers=user_agent_headers, params=params, proxy=proxy, timeout=timeout)
+                    logger.info(f"[yfinance] get_json returned data, type: {type(result)}")
+                    if isinstance(result, dict):
+                        logger.debug(f"[yfinance] get_json keys: {list(result.keys())[:10]}")
+                    return result
+                except Exception as e:
+                    logger.error(f"[yfinance] get_json failed: {e}", exc_info=True)
+                    raise
+            
+            yf_utils.get_json = patched_get_json
+            logger.info("Patched yfinance.utils.get_json with detailed logging")
+    except Exception as e:
+        logger.debug(f"Could not patch yfinance.utils.get_json: {e}")
+    
+    logger.info("User-Agent headers configured for yfinance (requests + urllib + yfinance.utils)")
 
 
 class MarketMonitoringAgent:
@@ -299,19 +361,44 @@ class MarketMonitoringAgent:
                 logger.debug(f"[yfinance] Request parameters: timeout=30, auto_adjust=False, progress=False")
                 
                 # Load data via yfinance
+                # Пробуем два метода: yf.download() и yf.Ticker().history()
+                data = None
+                download_error = None
+                
+                # Метод 1: yf.download() (основной метод)
                 try:
+                    logger.info(f"[yfinance] Trying yf.download() method...")
                     data = yf.download(
                         tickers=self.ticker,
                         period=self.period,
                         interval=self.interval,
                         progress=False,
                         auto_adjust=False,
-                        timeout=30  # Увеличиваем таймаут
+                        timeout=30
                     )
-                    logger.info(f"[yfinance] Download completed, received DataFrame with shape: {data.shape if not data.empty else 'EMPTY'}")
-                except Exception as download_error:
-                    logger.error(f"[yfinance] Download failed with error: {download_error}", exc_info=True)
-                    raise
+                    logger.info(f"[yfinance] yf.download() completed, received DataFrame with shape: {data.shape if not data.empty else 'EMPTY'}")
+                except Exception as e:
+                    download_error = e
+                    logger.warning(f"[yfinance] yf.download() failed: {e}")
+                    logger.info(f"[yfinance] Trying alternative method: yf.Ticker().history()...")
+                    
+                    # Метод 2: yf.Ticker().history() (альтернативный метод)
+                    try:
+                        ticker_obj = yf.Ticker(self.ticker)
+                        logger.info(f"[yfinance] Created Ticker object for {self.ticker}")
+                        
+                        data = ticker_obj.history(
+                            period=self.period,
+                            interval=self.interval,
+                            auto_adjust=False,
+                            timeout=30
+                        )
+                        logger.info(f"[yfinance] Ticker.history() completed, received DataFrame with shape: {data.shape if not data.empty else 'EMPTY'}")
+                    except Exception as history_error:
+                        logger.error(f"[yfinance] Both methods failed!")
+                        logger.error(f"[yfinance] yf.download() error: {download_error}")
+                        logger.error(f"[yfinance] Ticker.history() error: {history_error}", exc_info=True)
+                        raise download_error  # Поднимаем оригинальную ошибку
                 
                 # Check for empty data
                 if data.empty:
