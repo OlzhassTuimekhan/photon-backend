@@ -244,6 +244,8 @@ class DecisionAgentIntegration:
         """
         Принимает решение и сохраняет в БД.
         
+        ВАЖНО: Если решение SELL, но нет открытых позиций - автоматически меняет на HOLD.
+        
         Args:
             symbol: Объект Symbol
             market_data_obj: Объект MarketData (может быть None)
@@ -266,6 +268,30 @@ class DecisionAgentIntegration:
             
             # Принимаем решение
             ai_decision = decision_agent.receive_market_data(market_message)
+            
+            # ВАЖНО: Проверяем открытые позиции перед SELL
+            # Если нет открытых позиций, нельзя продавать - меняем на HOLD
+            if ai_decision.get("action") == "SELL":
+                from trading.models import Position
+                open_positions = Position.objects.filter(
+                    user=self.user,
+                    symbol=symbol,
+                    is_open=True
+                ).exists()
+                
+                if not open_positions:
+                    logger.info(f"No open positions for {symbol.symbol}, changing SELL to HOLD")
+                    ai_decision = {
+                        "action": "HOLD",
+                        "ticker": symbol.symbol,
+                        "confidence": 0.5,
+                        "reasoning": "HOLD: No open positions to sell",
+                        "quantity": 0,
+                        "price": market_message.get("ohlcv", {}).get("close", 0.0),
+                        "timestamp": timezone.now().isoformat() + "Z",
+                        "risk_score": 0.0,
+                        "model_type": ai_decision.get("model_type", "rule_based")
+                    }
             
             # Сохраняем решение в БД
             decision = TradingDecision.objects.create(
