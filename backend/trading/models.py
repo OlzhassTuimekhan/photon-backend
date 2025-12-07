@@ -244,3 +244,138 @@ class Trade(models.Model):
     def __str__(self):
         return f"{self.action} {self.quantity} {self.symbol.symbol} @ {self.price} ({self.executed_at})"
 
+
+class AgentLog(models.Model):
+    """Модель для логов агентов"""
+    LEVEL_CHOICES = [
+        ("info", "Информация"),
+        ("warning", "Предупреждение"),
+        ("error", "Ошибка"),
+    ]
+
+    agent_status = models.ForeignKey(
+        AgentStatus,
+        on_delete=models.CASCADE,
+        related_name="logs",
+    )
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
+    level = models.CharField(max_length=10, choices=LEVEL_CHOICES, default="info")
+    message = models.TextField()
+
+    class Meta:
+        ordering = ["-timestamp"]
+        indexes = [
+            models.Index(fields=["agent_status", "-timestamp"]),
+        ]
+
+    def __str__(self):
+        return f"{self.agent_status.get_agent_type_display()} - {self.level} - {self.message[:50]}"
+
+
+class Message(models.Model):
+    """Модель для сообщений между агентами"""
+    MESSAGE_TYPES = [
+        ("MARKET_SNAPSHOT", "Market Snapshot"),
+        ("TRADE_DECISION", "Trade Decision"),
+        ("EXECUTION_REPORT", "Execution Report"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="agent_messages",
+    )
+    from_agent = models.CharField(
+        max_length=20,
+        choices=AgentStatus.AGENT_TYPES,
+        db_index=True,
+    )
+    to_agent = models.CharField(
+        max_length=20,
+        choices=AgentStatus.AGENT_TYPES,
+        db_index=True,
+    )
+    message_type = models.CharField(max_length=20, choices=MESSAGE_TYPES, db_index=True)
+    payload = models.JSONField(default=dict)  # Данные сообщения
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+        indexes = [
+            models.Index(fields=["user", "-timestamp"]),
+            models.Index(fields=["from_agent", "-timestamp"]),
+            models.Index(fields=["to_agent", "-timestamp"]),
+            models.Index(fields=["message_type", "-timestamp"]),
+        ]
+
+    def __str__(self):
+        return f"{self.get_from_agent_display()} → {self.get_to_agent_display()} - {self.get_message_type_display()} ({self.timestamp})"
+
+
+class UserSettings(models.Model):
+    """Модель для хранения настроек пользователя"""
+    STATUS_CHOICES = [
+        ("running", "Запущена"),
+        ("paused", "Приостановлена"),
+        ("stopped", "Остановлена"),
+    ]
+
+    SPEED_CHOICES = [
+        (0.5, "0.5x (Slower)"),
+        (1.0, "1x (Normal)"),
+        (2.0, "2x (Fast)"),
+        (4.0, "4x (Very Fast)"),
+    ]
+
+    TIMEFRAME_CHOICES = [
+        ("5m", "5 минут"),
+        ("15m", "15 минут"),
+        ("1h", "1 час"),
+        ("4h", "4 часа"),
+        ("1d", "1 день"),
+    ]
+
+    RISK_LEVEL_CHOICES = [
+        ("low", "Низкий"),
+        ("medium", "Средний"),
+        ("high", "Высокий"),
+    ]
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="trading_settings",
+    )
+
+    # Simulation Controls
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="stopped")
+    speed = models.FloatField(choices=SPEED_CHOICES, default=1.0)
+
+    # Data Source Settings
+    symbol = models.CharField(max_length=20, default="AAPL")
+    timeframe = models.CharField(max_length=10, choices=TIMEFRAME_CHOICES, default="1h")
+    data_provider = models.CharField(max_length=50, default="Yahoo Finance")
+    history_length = models.CharField(max_length=50, default="Last 1 year")
+
+    # Model Settings
+    model_type = models.CharField(max_length=50, default="Random Forest")
+    prediction_horizon = models.CharField(max_length=20, default="1 hour")
+    confidence_threshold = models.DecimalField(max_digits=5, decimal_places=2, default=0.55)
+
+    # Trading Preferences
+    initial_balance = models.DecimalField(max_digits=20, decimal_places=2, default=10000.00)
+    max_position_size = models.IntegerField(default=50)  # в процентах
+    risk_level = models.CharField(max_length=10, choices=RISK_LEVEL_CHOICES, default="medium")
+    stop_loss = models.DecimalField(max_digits=5, decimal_places=2, default=-2.0)  # в процентах
+    take_profit = models.DecimalField(max_digits=5, decimal_places=2, default=5.0)  # в процентах
+    max_leverage = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"Settings for {self.user.email}"
+

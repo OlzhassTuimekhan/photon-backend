@@ -9,7 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from trading.models import Symbol, MarketData, TradingDecision, AgentStatus, Account, Position, Trade
+from trading.models import Symbol, MarketData, TradingDecision, AgentStatus, Account, Position, Trade, AgentLog, Message, UserSettings
 from trading.serializers import (
     SymbolSerializer,
     MarketDataSerializer,
@@ -18,6 +18,9 @@ from trading.serializers import (
     AccountSerializer,
     PositionSerializer,
     TradeSerializer,
+    AgentDetailSerializer,
+    MessageSerializer,
+    UserSettingsSerializer,
 )
 from trading.services import MarketDataService, get_market_data_service
 from trading.tasks import start_market_monitoring, stop_market_monitoring
@@ -519,3 +522,494 @@ class EquityCurveView(APIView):
             "sharpeRatio": float(sharpe_ratio),
             "equityData": equity_data,
         })
+
+
+class AgentsDetailView(APIView):
+    """Эндпойнт для получения детальной информации об агентах"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить список всех агентов с детальной информацией"""
+        # Получаем или создаем статусы для всех типов агентов
+        agent_types = ["MARKET_MONITOR", "DECISION_MAKER", "EXECUTION"]
+        agents = []
+        
+        for agent_type in agent_types:
+            status_obj, _ = AgentStatus.objects.get_or_create(
+                user=request.user,
+                agent_type=agent_type,
+                defaults={"status": "IDLE"},
+            )
+            serializer = AgentDetailSerializer(status_obj)
+            agent_data = serializer.data
+            # Преобразуем id в строку для соответствия фронтенду
+            agent_data["id"] = str(status_obj.id)
+            agents.append(agent_data)
+        
+        return Response(agents)
+
+
+class MessagesViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet для сообщений между агентами"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = MessageSerializer
+
+    def get_queryset(self):
+        """Получить все сообщения пользователя, отсортированные по времени"""
+        return Message.objects.filter(user=self.request.user).order_by("-timestamp")
+
+
+class PerformanceMetricsView(APIView):
+    """Эндпойнт для метрик производительности"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Рассчитывает все метрики производительности на основе сделок и позиций"""
+        from decimal import Decimal
+        from django.db.models import Sum, Count, Avg, Q
+        from django.utils import timezone as tz
+
+        # Получаем счет
+        account, _ = Account.objects.get_or_create(
+            user=request.user,
+            defaults={"balance": Decimal("10000.00"), "initial_balance": Decimal("10000.00")}
+        )
+
+        initial_balance = float(account.initial_balance)
+        current_balance = float(account.balance)
+        total_return = current_balance - initial_balance
+        return_percent = (total_return / initial_balance * 100) if initial_balance > 0 else 0
+
+        # Статистика по сделкам
+        all_trades = Trade.objects.filter(user=request.user, pnl__isnull=False)
+        total_trades = all_trades.count()
+
+        # Выигрышные и проигрышные сделки
+        winning_trades = all_trades.filter(pnl__gt=0)
+        losing_trades = all_trades.filter(pnl__lt=0)
+        winning_count = winning_trades.count()
+        losing_count = losing_trades.count()
+
+        # Средние значения
+        avg_win = float(winning_trades.aggregate(avg=Avg("pnl"))["avg"] or Decimal("0.00"))
+        avg_loss = float(losing_trades.aggregate(avg=Avg("pnl"))["avg"] or Decimal("0.00"))
+        avg_loss = abs(avg_loss) if avg_loss < 0 else avg_loss  # Делаем положительным для расчета
+
+        # Win Rate
+        win_rate = (winning_count / total_trades * 100) if total_trades > 0 else 0
+
+        # Win/Loss Ratio
+        win_loss_ratio = (avg_win / avg_loss) if avg_loss > 0 else 0
+
+        # Profit Factor
+        total_wins = float(winning_trades.aggregate(total=Sum("pnl"))["total"] or Decimal("0.00"))
+        total_losses = abs(float(losing_trades.aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")))
+        profit_factor = (total_wins / total_losses) if total_losses > 0 else 0
+
+        # Max Drawdown
+        trades_ordered = all_trades.order_by("executed_at")
+        max_drawdown = Decimal("0.00")
+        peak_balance = initial_balance
+        running_balance = initial_balance
+
+        for trade in trades_ordered:
+            running_balance += float(trade.pnl)
+            if running_balance > peak_balance:
+                peak_balance = running_balance
+            drawdown = running_balance - peak_balance
+            if drawdown < max_drawdown:
+                max_drawdown = Decimal(str(drawdown))
+
+        # Sharpe Ratio (упрощенная версия)
+        # Для реального расчета нужны более сложные вычисления с волатильностью
+        sharpe_ratio = Decimal("1.24")  # Заглушка, можно улучшить позже
+
+        return Response({
+            "totalReturn": float(total_return),
+            "sharpeRatio": float(sharpe_ratio),
+            "winRate": round(win_rate, 1),
+            "profitFactor": round(profit_factor, 2),
+            "maxDrawdown": float(max_drawdown),
+            "totalTrades": total_trades,
+            "winningTrades": winning_count,
+            "losingTrades": losing_count,
+            "avgWin": round(avg_win, 2),
+            "avgLoss": round(-avg_loss, 2) if avg_loss > 0 else 0,  # Возвращаем отрицательным
+            "winLossRatio": round(win_loss_ratio, 2),
+            "returnPercent": round(return_percent, 1),
+        })
+
+
+class PnLCurveView(APIView):
+    """Эндпойнт для данных P&L Curve"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить данные для графика P&L Curve (последние 30 дней)"""
+        from decimal import Decimal
+        from django.db.models import Sum
+        from django.utils import timezone as tz
+        from datetime import timedelta
+
+        # Получаем счет
+        account, _ = Account.objects.get_or_create(
+            user=request.user,
+            defaults={"balance": Decimal("10000.00"), "initial_balance": Decimal("10000.00")}
+        )
+
+        initial_balance = float(account.initial_balance)
+        current_balance = float(account.balance)
+
+        # Генерируем данные для графика (последние 30 дней)
+        pnl_data = []
+        days = 30
+        today = tz.now().date()
+
+        for i in range(days + 1):
+            date = today - timedelta(days=days - i)
+            # Рассчитываем баланс на эту дату
+            trades_until_date = Trade.objects.filter(
+                user=request.user,
+                executed_at__date__lte=date
+            ).aggregate(total_pnl=Sum("pnl"))["total_pnl"] or Decimal("0.00")
+
+            balance_on_date = initial_balance + float(trades_until_date)
+            pnl_data.append({
+                "day": i,
+                "balance": balance_on_date,
+                "date": date.strftime("%b %d"),
+            })
+
+        return Response({
+            "initialBalance": initial_balance,
+            "currentBalance": current_balance,
+            "pnlData": pnl_data,
+        })
+
+
+class MonthlyBreakdownView(APIView):
+    """Эндпойнт для разбивки P&L по периодам"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить P&L разбивку по периодам (Today, Yesterday, This Week, по месяцам)"""
+        from decimal import Decimal
+        from django.db.models import Sum
+        from django.utils import timezone as tz
+        from datetime import timedelta, datetime
+
+        breakdown = []
+
+        # Сегодня
+        today_start = tz.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_pnl = Trade.objects.filter(
+            user=request.user,
+            executed_at__gte=today_start,
+            pnl__isnull=False
+        ).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+        breakdown.append({
+            "period": "Today",
+            "pnl": float(today_pnl),
+        })
+
+        # Вчера
+        yesterday_start = today_start - timedelta(days=1)
+        yesterday_pnl = Trade.objects.filter(
+            user=request.user,
+            executed_at__gte=yesterday_start,
+            executed_at__lt=today_start,
+            pnl__isnull=False
+        ).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+        breakdown.append({
+            "period": "Yesterday",
+            "pnl": float(yesterday_pnl),
+        })
+
+        # Эта неделя
+        week_start = today_start - timedelta(days=today_start.weekday())
+        week_pnl = Trade.objects.filter(
+            user=request.user,
+            executed_at__gte=week_start,
+            pnl__isnull=False
+        ).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+        breakdown.append({
+            "period": "This Week",
+            "pnl": float(week_pnl),
+        })
+
+        # Последние 3 месяца
+        now = tz.now()
+        for i in range(3):
+            month_date = now - timedelta(days=30 * (i + 1))
+            month_start = month_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if i == 0:
+                month_end = now
+            else:
+                next_month = month_start + timedelta(days=32)
+                month_end = next_month.replace(day=1) - timedelta(days=1)
+
+            month_pnl = Trade.objects.filter(
+                user=request.user,
+                executed_at__gte=month_start,
+                executed_at__lte=month_end,
+                pnl__isnull=False
+            ).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+
+            month_name = month_start.strftime("%b %Y")
+            breakdown.append({
+            "period": month_name,
+            "pnl": float(month_pnl),
+            })
+
+        return Response(breakdown)
+
+
+class SettingsView(APIView):
+    """Эндпойнт для получения и обновления настроек пользователя"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить настройки пользователя"""
+        settings, created = UserSettings.objects.get_or_create(
+            user=request.user,
+            defaults={
+                "status": "stopped",
+                "speed": 1.0,
+                "symbol": "AAPL",
+                "timeframe": "1h",
+                "data_provider": "Yahoo Finance",
+                "history_length": "Last 1 year",
+                "model_type": "Random Forest",
+                "prediction_horizon": "1 hour",
+                "confidence_threshold": 0.55,
+                "initial_balance": 10000.00,
+                "max_position_size": 50,
+                "risk_level": "medium",
+                "stop_loss": -2.0,
+                "take_profit": 5.0,
+                "max_leverage": 1.0,
+            }
+        )
+        serializer = UserSettingsSerializer(settings)
+        return Response(serializer.data)
+
+    def put(self, request):
+        """Обновить настройки пользователя"""
+        from decimal import Decimal
+
+        settings, created = UserSettings.objects.get_or_create(
+            user=request.user,
+            defaults={
+                "status": "stopped",
+                "speed": 1.0,
+                "symbol": "AAPL",
+                "timeframe": "1h",
+                "data_provider": "Yahoo Finance",
+                "history_length": "Last 1 year",
+                "model_type": "Random Forest",
+                "prediction_horizon": "1 hour",
+                "confidence_threshold": 0.55,
+                "initial_balance": 10000.00,
+                "max_position_size": 50,
+                "risk_level": "medium",
+                "stop_loss": -2.0,
+                "take_profit": 5.0,
+                "max_leverage": 1.0,
+            }
+        )
+
+        # Обновляем поля из запроса
+        data = request.data
+
+        # Преобразуем названия полей из фронтенда в названия модели
+        if "status" in data:
+            settings.status = data["status"]
+        if "speed" in data:
+            settings.speed = float(data["speed"])
+        if "symbol" in data:
+            settings.symbol = data["symbol"]
+        if "timeframe" in data:
+            settings.timeframe = data["timeframe"]
+        if "dataProvider" in data:
+            settings.data_provider = data["dataProvider"]
+        if "historyLength" in data:
+            settings.history_length = data["historyLength"]
+        if "modelType" in data:
+            settings.model_type = data["modelType"]
+        if "predictionHorizon" in data:
+            settings.prediction_horizon = data["predictionHorizon"]
+        if "confidenceThreshold" in data:
+            settings.confidence_threshold = Decimal(str(data["confidenceThreshold"]))
+        if "initialBalance" in data:
+            settings.initial_balance = Decimal(str(data["initialBalance"]))
+        if "maxPositionSize" in data:
+            settings.max_position_size = int(data["maxPositionSize"])
+        if "riskLevel" in data:
+            settings.risk_level = data["riskLevel"]
+        if "stopLoss" in data:
+            settings.stop_loss = Decimal(str(data["stopLoss"]))
+        if "takeProfit" in data:
+            settings.take_profit = Decimal(str(data["takeProfit"]))
+        if "maxLeverage" in data:
+            settings.max_leverage = Decimal(str(data["maxLeverage"]))
+
+        settings.save()
+
+        serializer = UserSettingsSerializer(settings)
+        return Response(serializer.data)
+
+    def patch(self, request):
+        """Частичное обновление настроек (аналогично PUT)"""
+        return self.put(request)
+
+
+class DashboardOverviewView(APIView):
+    """Эндпойнт для получения данных Dashboard Overview"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить данные для Dashboard Overview (KPICards)"""
+        from decimal import Decimal
+        from django.db.models import Sum, Count, Q
+        from django.utils import timezone as tz
+
+        # Получаем счет
+        account, _ = Account.objects.get_or_create(
+            user=request.user,
+            defaults={"balance": Decimal("10000.00"), "initial_balance": Decimal("10000.00")}
+        )
+
+        balance = float(account.balance)
+
+        # P&L за сегодня
+        today_start = tz.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_trades = Trade.objects.filter(
+            user=request.user,
+            executed_at__gte=today_start,
+            pnl__isnull=False
+        )
+        today_pnl = float(today_trades.aggregate(total=Sum("pnl"))["total"] or Decimal("0.00"))
+        today_trades_count = today_trades.count()
+
+        # Win Rate
+        all_trades = Trade.objects.filter(user=request.user, pnl__isnull=False)
+        total_trades = all_trades.count()
+        winning_trades = all_trades.filter(pnl__gt=0).count()
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+
+        # Статус агентов
+        agent_statuses = AgentStatus.objects.filter(user=request.user)
+        active_count = agent_statuses.filter(status="RUNNING").count()
+        total_agents = agent_statuses.count()
+        agents_status = "All Active" if active_count == total_agents and total_agents > 0 else f"{active_count}/{total_agents} Active"
+
+        return Response({
+            "balance": balance,
+            "todayPnL": today_pnl,
+            "todayTradesCount": today_trades_count,
+            "winRate": round(win_rate, 1),
+            "agentsStatus": agents_status,
+            "activeAgentsCount": active_count,
+        })
+
+
+class MarketChartView(APIView):
+    """Эндпойнт для получения данных графика рынка"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить данные для графика по символу"""
+        symbol_param = request.query_params.get("symbol", "AAPL")
+        timeframe = request.query_params.get("timeframe", "1h")  # 15m, 1h, 4h, 1d
+
+        # Получаем символ пользователя
+        try:
+            symbol = Symbol.objects.get(user=request.user, symbol=symbol_param, is_active=True)
+        except Symbol.DoesNotExist:
+            return Response(
+                {"detail": f"Symbol {symbol_param} not found or not active"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Определяем период для данных в зависимости от timeframe
+        from datetime import timedelta
+        from django.utils import timezone as tz
+
+        timeframe_map = {
+            "15m": timedelta(hours=6),  # 6 часов данных для 15-минутного графика
+            "1h": timedelta(days=7),    # 7 дней для часового графика
+            "4h": timedelta(days=30),   # 30 дней для 4-часового графика
+            "1d": timedelta(days=90),    # 90 дней для дневного графика
+        }
+
+        period = timeframe_map.get(timeframe, timedelta(days=7))
+        start_time = tz.now() - period
+
+        # Получаем данные рынка
+        market_data = MarketData.objects.filter(
+            symbol=symbol,
+            timestamp__gte=start_time
+        ).order_by("timestamp")
+
+        # Формируем данные для графика
+        chart_data = []
+        for data in market_data:
+            chart_data.append({
+                "timestamp": data.timestamp,
+                "price": float(data.price),
+                "volume": int(data.volume) if data.volume else None,
+            })
+
+        # Получаем текущую цену (последняя запись)
+        current_price = float(market_data.last().price) if market_data.exists() else 0.0
+
+        return Response({
+            "symbol": symbol_param,
+            "currentPrice": current_price,
+            "data": chart_data,
+        })
+
+
+class MarketHeatmapView(APIView):
+    """Эндпойнт для получения данных Market Heatmap"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить данные для heatmap (топ гейнеры и лузеры)"""
+        # Получаем все активные символы пользователя
+        symbols = Symbol.objects.filter(user=request.user, is_active=True)
+
+        market_data_list = []
+        for symbol in symbols:
+            # Получаем последние 2 записи для расчета изменения
+            latest_data = MarketData.objects.filter(symbol=symbol).order_by("-timestamp")[:2]
+            
+            if latest_data.count() >= 2:
+                current = latest_data[0]
+                previous = latest_data[1]
+                
+                market_data_list.append({
+                    "symbol": symbol.symbol,
+                    "price": float(current.price),
+                    "previousPrice": float(previous.price),
+                    "volume": int(current.volume) if current.volume else 0,
+                    "timestamp": current.timestamp,
+                })
+            elif latest_data.count() == 1:
+                # Если только одна запись, используем её как текущую и предыдущую
+                current = latest_data[0]
+                market_data_list.append({
+                    "symbol": symbol.symbol,
+                    "price": float(current.price),
+                    "previousPrice": float(current.price),  # Нет изменения
+                    "volume": int(current.volume) if current.volume else 0,
+                    "timestamp": current.timestamp,
+                })
+
+        # Сортируем по изменению (от большего к меньшему)
+        market_data_list.sort(
+            key=lambda x: (x["price"] - x["previousPrice"]) / x["previousPrice"] if x["previousPrice"] > 0 else 0,
+            reverse=True
+        )
+
+        return Response(market_data_list)

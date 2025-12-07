@@ -7,6 +7,9 @@ from trading.models import (
     Account,
     Position,
     Trade,
+    AgentLog,
+    Message,
+    UserSettings,
 )
 
 
@@ -65,4 +68,28 @@ class TradeAdmin(admin.ModelAdmin):
     list_filter = ["action", "agent_type", "executed_at"]
     search_fields = ["symbol__symbol", "user__email"]
     readonly_fields = ["executed_at"]
+
+
+@admin.register(AgentLog)
+class AgentLogAdmin(admin.ModelAdmin):
+    list_display = ["agent_status", "level", "message", "timestamp"]
+    list_filter = ["level", "timestamp"]
+    search_fields = ["message", "agent_status__user__email"]
+    readonly_fields = ["timestamp"]
+
+
+@admin.register(Message)
+class MessageAdmin(admin.ModelAdmin):
+    list_display = ["from_agent", "to_agent", "message_type", "user", "timestamp"]
+    list_filter = ["message_type", "from_agent", "to_agent", "timestamp"]
+    search_fields = ["user__email"]
+    readonly_fields = ["timestamp"]
+
+
+@admin.register(UserSettings)
+class UserSettingsAdmin(admin.ModelAdmin):
+    list_display = ["user", "status", "symbol", "model_type", "risk_level", "updated_at"]
+    list_filter = ["status", "risk_level", "model_type", "updated_at"]
+    search_fields = ["user__email", "symbol"]
+    readonly_fields = ["created_at", "updated_at"]
 
