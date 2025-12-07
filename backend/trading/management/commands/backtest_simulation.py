@@ -157,15 +157,18 @@ class Command(BaseCommand):
             if not isinstance(historical_data.index, pd.DatetimeIndex):
                 historical_data.index = pd.to_datetime(historical_data.index)
             
-            # Конвертируем start_date и end_date в pandas Timestamp для корректного сравнения
-            start_ts = pd.Timestamp(start_date)
-            end_ts = pd.Timestamp(end_date)
+            # Конвертируем start_date и end_date в тот же тип, что и индекс
+            # Используем numpy datetime64 для совместимости
+            import numpy as np
+            start_ts = np.datetime64(start_date)
+            end_ts = np.datetime64(end_date)
             
-            # Фильтруем по датам
-            historical_data = historical_data[
-                (historical_data.index >= start_ts) & 
-                (historical_data.index <= end_ts)
-            ]
+            # Конвертируем индекс в numpy datetime64 для сравнения
+            index_as_numpy = historical_data.index.values.astype('datetime64[ns]')
+            
+            # Фильтруем по датам используя numpy сравнение
+            mask = (index_as_numpy >= start_ts) & (index_as_numpy <= end_ts)
+            historical_data = historical_data.loc[mask]
             
             if historical_data.empty:
                 self.stdout.write(self.style.ERROR("Нет данных в указанном периоде"))
