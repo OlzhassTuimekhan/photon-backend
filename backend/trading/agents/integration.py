@@ -439,8 +439,8 @@ class ExecutionAgentIntegration:
                 else:
                     # НЕТ открытой позиции - разрешаем SELL для симуляции
                     # Это ускоряет сбор данных для обучения модели
+                    # ВАЖНО: Не изменяем баланс - это виртуальная сделка только для обучения
                     # Создаем "виртуальную" позицию для расчета PnL
-                    # Используем среднюю цену за последние N сделок как entry_price
                     from trading.models import Trade as TradeModel
                     recent_buys = TradeModel.objects.filter(
                         user=self.user,
@@ -460,15 +460,16 @@ class ExecutionAgentIntegration:
                     trade.pnl = pnl
                     trade.save()
                     
-                    # Обновляем счет (добавляем средства от продажи)
-                    revenue = quantity * executed_price
-                    account.balance += revenue
-                    account.free_cash += revenue
-                    account.save()
+                    # ВАЖНО: НЕ изменяем баланс при виртуальной продаже без позиции
+                    # Это симуляция только для обучения модели
+                    # В реальной торговле нельзя продать то, чего нет
+                    # Баланс остается прежним - мы ничего не получили, т.к. нечего было продавать
                     
                     logger.info(
-                        f"Simulated SELL without position: {quantity} {symbol.symbol} @ {executed_price}, "
-                        f"virtual entry: {avg_entry_price:.2f}, PnL: {pnl:.2f}"
+                        f"Simulated SELL without position (virtual trade for learning): "
+                        f"{quantity} {symbol.symbol} @ {executed_price}, "
+                        f"virtual entry: {avg_entry_price:.2f}, PnL: {pnl:.2f} "
+                        f"(balance unchanged - no actual asset to sell)"
                     )
             
             # Отправляем отчет
