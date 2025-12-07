@@ -291,6 +291,8 @@ class DecisionMakerAgentView(APIView):
     def post(self, request):
         """Запросить анализ и решение для символа"""
         from decimal import Decimal
+        from trading.agents import MarketMonitoringAgent, DecisionMakingAgent
+        from trading.agents.integration import MarketAgentIntegration, DecisionAgentIntegration
 
         try:
             symbol_id = request.data.get("symbol_id")
@@ -302,10 +304,47 @@ class DecisionMakerAgentView(APIView):
             except Symbol.DoesNotExist:
                 return Response({"detail": "Symbol not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            # Получаем последние данные рынка
-            latest_data = MarketData.objects.filter(symbol=symbol).order_by("-timestamp").first()
-            if not latest_data:
-                # Получаем данные напрямую
+            # Получаем настройки пользователя для конфигурации агентов
+            user_settings, _ = UserSettings.objects.get_or_create(
+                user=request.user,
+                defaults={"timeframe": "1h", "risk_level": "medium"}
+            )
+            
+            # Определяем параметры из настроек
+            timeframe = user_settings.timeframe or "1h"
+            # Маппинг timeframe в period для агента
+            period_map = {
+                "5m": "1d",
+                "15m": "3d",
+                "1h": "1mo",
+                "4h": "3mo",
+                "1d": "1y",
+            }
+            period = period_map.get(timeframe, "1mo")
+            
+            # Шаг 1: Используем MarketMonitoringAgent для получения данных с индикаторами
+            try:
+                market_integration = MarketAgentIntegration(request.user)
+                market_agent = MarketMonitoringAgent(
+                    ticker=symbol.symbol,
+                    interval=timeframe,
+                    period=period,
+                    enable_cache=True
+                )
+                
+                # Получаем обработанные данные с анализом
+                market_message = market_integration.process_and_save(
+                    symbol=symbol,
+                    market_agent=market_agent,
+                    save_to_db=True
+                )
+                
+                # Получаем последние данные для связи с решением
+                latest_data = MarketData.objects.filter(symbol=symbol).order_by("-timestamp").first()
+                
+            except Exception as market_error:
+                logger.error(f"Error getting market data with agent: {str(market_error)}", exc_info=True)
+                # Fallback: используем существующий сервис
                 market_service = get_market_data_service()
                 data = market_service.get_latest_data(symbol.symbol)
                 if not data:
@@ -318,25 +357,58 @@ class DecisionMakerAgentView(APIView):
                         {"detail": f"Ошибка создания данных рынка: {str(create_error)}"},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR
                     )
-
-            # TODO: Здесь будет вызов AI модели для принятия решения
-            # Пока возвращаем заглушку
-            try:
+                # Если fallback, возвращаем HOLD
                 decision = TradingDecision.objects.create(
                     user=request.user,
                     symbol=symbol,
-                    decision="HOLD",  # Заглушка
+                    decision="HOLD",
                     confidence=Decimal("50.0"),
                     market_data=latest_data,
-                    reasoning="AI model not implemented yet. This is a placeholder decision.",
+                    reasoning=f"Error getting market data: {str(market_error)}",
                     metadata={},
                 )
                 serializer = TradingDecisionSerializer(decision)
                 return Response(serializer.data)
+
+            # Шаг 2: Используем DecisionMakingAgent для принятия решения
+            try:
+                decision_integration = DecisionAgentIntegration(request.user)
+                
+                # Получаем настройки для агента
+                risk_tolerance = user_settings.risk_level or "medium"
+                confidence_threshold = float(user_settings.confidence_threshold or 0.55)
+                model_type = user_settings.model_type or "Random Forest"
+                
+                # Маппинг названия модели
+                model_type_map = {
+                    "Random Forest": "random_forest",
+                    "Gradient Boosting": "gradient_boosting",
+                }
+                agent_model_type = model_type_map.get(model_type, "random_forest")
+                
+                # Создаем DecisionMakingAgent с настройками пользователя
+                decision_agent = DecisionMakingAgent(
+                    model_type=agent_model_type,
+                    risk_tolerance=risk_tolerance,
+                    min_confidence=confidence_threshold,
+                    enable_ai=True
+                )
+                
+                # Принимаем решение
+                decision = decision_integration.make_decision(
+                    symbol=symbol,
+                    market_data_obj=latest_data,
+                    market_message=market_message,
+                    decision_agent=decision_agent
+                )
+                
+                serializer = TradingDecisionSerializer(decision)
+                return Response(serializer.data)
+                
             except Exception as decision_error:
-                logger.error(f"Error creating TradingDecision: {str(decision_error)}", exc_info=True)
+                logger.error(f"Error in decision-making agent: {str(decision_error)}", exc_info=True)
                 return Response(
-                    {"detail": f"Ошибка создания решения: {str(decision_error)}"},
+                    {"detail": f"Ошибка принятия решения: {str(decision_error)}"},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
         except Exception as e:
@@ -348,7 +420,7 @@ class DecisionMakerAgentView(APIView):
 
 
 class ExecutionAgentView(APIView):
-    """Управление Execution Agent (пока только статус, т.к. не выполняем реальные сделки)"""
+    """Управление Execution Agent"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -359,6 +431,88 @@ class ExecutionAgentView(APIView):
             defaults={"status": "IDLE"},
         )
         return Response(AgentStatusSerializer(status_obj).data)
+    
+    def post(self, request):
+        """Выполнить решение (сделку)"""
+        from trading.agents import ExecutionAgent
+        from trading.agents.integration import ExecutionAgentIntegration
+        
+        try:
+            decision_id = request.data.get("decision_id")
+            if not decision_id:
+                return Response({"detail": "decision_id required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                decision = TradingDecision.objects.get(id=decision_id, user=request.user)
+            except TradingDecision.DoesNotExist:
+                return Response({"detail": "Decision not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Если решение HOLD, не выполняем
+            if decision.decision == "HOLD":
+                return Response({
+                    "detail": "Decision is HOLD, no execution needed",
+                    "decision_id": decision.id,
+                    "status": "skipped"
+                })
+            
+            # Получаем настройки пользователя
+            user_settings, _ = UserSettings.objects.get_or_create(
+                user=request.user,
+                defaults={"risk_level": "medium"}
+            )
+            
+            # Создаем ExecutionAgent
+            execution_agent = ExecutionAgent(
+                execution_mode="simulated",  # Всегда симулируем для безопасности
+                enable_slippage=True,
+                slippage_factor=0.001,  # 0.1% slippage
+                commission_rate=0.001,  # 0.1% commission
+            )
+            
+            # Формируем решение для агента из TradingDecision
+            decision_dict = {
+                "action": decision.decision,
+                "ticker": decision.symbol.symbol,
+                "quantity": decision.metadata.get("quantity", 1),
+                "price": decision.metadata.get("price", float(decision.market_data.price) if decision.market_data else 0.0),
+                "confidence": float(decision.confidence / 100) if decision.confidence else 0.5,  # Конвертируем обратно в 0-1
+                "timestamp": decision.created_at.isoformat(),
+                "reasoning": decision.reasoning,
+            }
+            
+            # Выполняем сделку через агента
+            execution_result = execution_agent.receive_decision(decision_dict)
+            
+            # Сохраняем в БД через интеграцию
+            execution_integration = ExecutionAgentIntegration(request.user)
+            trade = execution_integration.execute_trade(
+                symbol=decision.symbol,
+                decision_obj=decision,
+                execution_agent=execution_agent,
+                execution_result=execution_result
+            )
+            
+            if trade:
+                from trading.serializers import TradeSerializer
+                serializer = TradeSerializer(trade)
+                return Response({
+                    "status": "executed",
+                    "trade": serializer.data,
+                    "execution_result": execution_result
+                })
+            else:
+                return Response({
+                    "status": execution_result.get("status", "rejected"),
+                    "message": execution_result.get("message", "Trade not executed"),
+                    "execution_result": execution_result
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
+            logger.error(f"Error in execution agent endpoint: {str(e)}", exc_info=True)
+            return Response(
+                {"detail": f"Ошибка выполнения сделки: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class PortfolioView(APIView):
