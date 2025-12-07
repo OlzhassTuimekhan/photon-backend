@@ -8,9 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from ml_clients import call_agent1
-from ml_clients import call_agent2
-from ml_clients import call_agent3
+from clients.ml_client import call_agent1, call_agent2, call_agent3
 
 from trading.models import Symbol, MarketData, TradingDecision, AgentStatus, Account, Position, Trade
 from trading.serializers import (
