@@ -1,5 +1,13 @@
 from rest_framework import serializers
-from trading.models import Symbol, MarketData, TradingDecision, AgentStatus
+from trading.models import (
+    Symbol,
+    MarketData,
+    TradingDecision,
+    AgentStatus,
+    Account,
+    Position,
+    Trade,
+)
 
 
 class SymbolSerializer(serializers.ModelSerializer):
@@ -74,4 +82,75 @@ class AgentStatusSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "updated_at"]
+
+
+class AccountSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Account
+        fields = [
+            "id",
+            "balance",
+            "free_cash",
+            "used_margin",
+            "initial_balance",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class PositionSerializer(serializers.ModelSerializer):
+    symbol_name = serializers.CharField(source="symbol.symbol", read_only=True)
+    pnl = serializers.SerializerMethodField()
+    pnl_percent = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Position
+        fields = [
+            "id",
+            "symbol",
+            "symbol_name",
+            "quantity",
+            "entry_price",
+            "current_price",
+            "pnl",
+            "pnl_percent",
+            "opened_at",
+            "closed_at",
+            "is_open",
+        ]
+        read_only_fields = ["id", "opened_at", "closed_at"]
+
+    def get_pnl(self, obj):
+        """Рассчитывает P&L"""
+        if obj.is_open and obj.current_price:
+            return float((obj.current_price - obj.entry_price) * obj.quantity)
+        return None
+
+    def get_pnl_percent(self, obj):
+        """Рассчитывает процент P&L"""
+        if obj.is_open and obj.current_price and obj.entry_price:
+            return float(((obj.current_price - obj.entry_price) / obj.entry_price) * 100)
+        return None
+
+
+class TradeSerializer(serializers.ModelSerializer):
+    symbol_name = serializers.CharField(source="symbol.symbol", read_only=True)
+    agent = serializers.CharField(source="agent_type", read_only=True)
+    timestamp = serializers.DateTimeField(source="executed_at", read_only=True)
+
+    class Meta:
+        model = Trade
+        fields = [
+            "id",
+            "symbol",
+            "symbol_name",
+            "action",
+            "price",
+            "quantity",
+            "agent",
+            "pnl",
+            "timestamp",
+        ]
+        read_only_fields = ["id", "timestamp"]
 

@@ -1,5 +1,13 @@
 from django.contrib import admin
-from trading.models import Symbol, MarketData, TradingDecision, AgentStatus
+from trading.models import (
+    Symbol,
+    MarketData,
+    TradingDecision,
+    AgentStatus,
+    Account,
+    Position,
+    Trade,
+)
 
 
 @admin.register(Symbol)
@@ -33,4 +41,28 @@ class AgentStatusAdmin(admin.ModelAdmin):
     list_filter = ["agent_type", "status", "updated_at"]
     search_fields = ["user__email"]
     readonly_fields = ["updated_at"]
+
+
+@admin.register(Account)
+class AccountAdmin(admin.ModelAdmin):
+    list_display = ["user", "balance", "free_cash", "used_margin", "updated_at"]
+    list_filter = ["updated_at"]
+    search_fields = ["user__email"]
+    readonly_fields = ["created_at", "updated_at"]
+
+
+@admin.register(Position)
+class PositionAdmin(admin.ModelAdmin):
+    list_display = ["symbol", "user", "quantity", "entry_price", "current_price", "is_open", "opened_at"]
+    list_filter = ["is_open", "opened_at"]
+    search_fields = ["symbol__symbol", "user__email"]
+    readonly_fields = ["opened_at", "closed_at"]
+
+
+@admin.register(Trade)
+class TradeAdmin(admin.ModelAdmin):
+    list_display = ["symbol", "user", "action", "price", "quantity", "pnl", "executed_at"]
+    list_filter = ["action", "agent_type", "executed_at"]
+    search_fields = ["symbol__symbol", "user__email"]
+    readonly_fields = ["executed_at"]
 

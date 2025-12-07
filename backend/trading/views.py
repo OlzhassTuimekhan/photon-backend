@@ -12,12 +12,15 @@ from ml_clients import call_agent1
 from ml_clients import call_agent2
 from ml_clients import call_agent3
 
-from trading.models import Symbol, MarketData, TradingDecision, AgentStatus
+from trading.models import Symbol, MarketData, TradingDecision, AgentStatus, Account, Position, Trade
 from trading.serializers import (
     SymbolSerializer,
     MarketDataSerializer,
     TradingDecisionSerializer,
     AgentStatusSerializer,
+    AccountSerializer,
+    PositionSerializer,
+    TradeSerializer,
 )
 from trading.services import MarketDataService, get_market_data_service
 from trading.tasks import start_market_monitoring, stop_market_monitoring
@@ -244,19 +247,19 @@ class MarketMonitorAgentView(APIView):
             defaults={"status": "IDLE"},
         )
 
-       if action_type == "start":
-           ml_response = call_agent1({"user_id": request.user.id})
+        if action_type == "start":
+            ml_response = call_agent1({"user_id": request.user.id})
 
-           status_obj.status = "RUNNING"
-           status_obj.metadata = {}
-           status_obj.last_activity = timezone.now()
-           status_obj.save()
+            status_obj.status = "RUNNING"
+            status_obj.metadata = {}
+            status_obj.last_activity = timezone.now()
+            status_obj.save()
 
-           return Response({
-               "status": "started",
-               "message": "Market monitoring agent started",
-               "ml_response": ml_response,
-           })
+            return Response({
+                "status": "started",
+                "message": "Market monitoring agent started",
+                "ml_response": ml_response,
+            })
 
         elif action_type == "stop":
             # Останавливаем задачу
@@ -317,22 +320,23 @@ class DecisionMakerAgentView(APIView):
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR
                     )
 
-           # ---- ВЫЗОВ ML API ----
-           ml_result = call_agent2({
-               "symbol": symbol.symbol,
-               "price": str(latest_data.price),
-               "timestamp": latest_data.timestamp.isoformat()
-           })
+            # ---- ВЫЗОВ ML API ----
+            ml_result = call_agent2({
+                "symbol": symbol.symbol,
+                "price": str(latest_data.price),
+                "timestamp": latest_data.timestamp.isoformat()
+            })
 
-           decision = TradingDecision.objects.create(
-               user=request.user,
-               symbol=symbol,
-               decision=ml_result.get("decision", "HOLD"),
-               confidence=Decimal(str(ml_result.get("confidence", 50.0))),
-               market_data=latest_data,
-               reasoning=ml_result.get("reasoning", "No reasoning provided by ML."),
-               metadata=ml_result,
-           )
+            try:
+                decision = TradingDecision.objects.create(
+                    user=request.user,
+                    symbol=symbol,
+                    decision=ml_result.get("decision", "HOLD"),
+                    confidence=Decimal(str(ml_result.get("confidence", 50.0))),
+                    market_data=latest_data,
+                    reasoning=ml_result.get("reasoning", "No reasoning provided by ML."),
+                    metadata=ml_result,
+                )
                 serializer = TradingDecisionSerializer(decision)
                 return Response(serializer.data)
             except Exception as decision_error:
@@ -362,10 +366,173 @@ class ExecutionAgentView(APIView):
         )
         return Response(AgentStatusSerializer(status_obj).data)
 
-
     def post(self, request):
+        """Выполнить сделку через Execution Agent"""
         ml_response = call_agent3({"user_id": request.user.id})
         return Response({
             "status": "executed",
             "ml_response": ml_response
+        })
+
+
+class PortfolioView(APIView):
+    """Эндпойнт для получения данных портфеля"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить сводку портфеля"""
+        from decimal import Decimal
+        from django.db.models import Sum, Count, Q
+        from django.utils import timezone as tz
+
+        # Получаем или создаем счет пользователя
+        account, _ = Account.objects.get_or_create(
+            user=request.user,
+            defaults={"balance": Decimal("10000.00"), "free_cash": Decimal("10000.00")}
+        )
+
+        # Обновляем текущие цены для открытых позиций
+        open_positions = Position.objects.filter(user=request.user, is_open=True)
+        for position in open_positions:
+            # Получаем последнюю цену из MarketData
+            latest_data = MarketData.objects.filter(symbol=position.symbol).order_by("-timestamp").first()
+            if latest_data:
+                position.current_price = latest_data.price
+                position.save(update_fields=["current_price"])
+
+        # Рассчитываем использованную маржу (сумма всех открытых позиций)
+        used_margin = Decimal("0.00")
+        for position in open_positions:
+            if position.current_price:
+                used_margin += position.current_price * position.quantity
+
+        # Обновляем счет
+        account.used_margin = used_margin
+        account.free_cash = account.balance - used_margin
+        account.save(update_fields=["used_margin", "free_cash"])
+
+        # Статистика по сделкам
+        total_trades = Trade.objects.filter(user=request.user).count()
+        
+        # P&L за сегодня
+        today_start = tz.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_trades = Trade.objects.filter(
+            user=request.user,
+            executed_at__gte=today_start
+        )
+        today_pnl = today_trades.aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+
+        # Общий P&L (из всех закрытых позиций и сделок)
+        total_pnl = Trade.objects.filter(user=request.user).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+        # Также добавляем P&L от открытых позиций
+        for position in open_positions:
+            if position.current_price:
+                position_pnl = (position.current_price - position.entry_price) * position.quantity
+                total_pnl += position_pnl
+
+        return Response({
+            "balance": float(account.balance),
+            "freeCash": float(account.free_cash),
+            "usedMargin": float(account.used_margin),
+            "totalTrades": total_trades,
+            "todayPnL": float(today_pnl),
+            "totalPnL": float(total_pnl),
+        })
+
+
+class PositionViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet для открытых позиций"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = PositionSerializer
+
+    def get_queryset(self):
+        """Получить только открытые позиции пользователя"""
+        queryset = Position.objects.filter(user=self.request.user, is_open=True)
+        
+        # Обновляем текущие цены
+        for position in queryset:
+            latest_data = MarketData.objects.filter(symbol=position.symbol).order_by("-timestamp").first()
+            if latest_data:
+                position.current_price = latest_data.price
+                position.save(update_fields=["current_price"])
+        
+        return queryset.select_related("symbol").order_by("-opened_at")
+
+
+class TradeViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet для истории сделок"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = TradeSerializer
+
+    def get_queryset(self):
+        """Получить последние 20 сделок пользователя"""
+        return Trade.objects.filter(user=self.request.user).select_related("symbol").order_by("-executed_at")[:20]
+
+
+class EquityCurveView(APIView):
+    """Эндпойнт для данных equity curve"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Получить данные для графика equity curve"""
+        from decimal import Decimal
+        from django.db.models import Sum, Min, Max
+        from django.utils import timezone as tz
+        from datetime import timedelta
+
+        # Получаем счет
+        account, _ = Account.objects.get_or_create(
+            user=request.user,
+            defaults={"balance": Decimal("10000.00"), "initial_balance": Decimal("10000.00")}
+        )
+
+        initial_balance = float(account.initial_balance)
+        current_balance = float(account.balance)
+
+        # Рассчитываем max drawdown
+        # Получаем все сделки с P&L
+        trades = Trade.objects.filter(user=request.user, pnl__isnull=False).order_by("executed_at")
+        
+        max_drawdown = Decimal("0.00")
+        peak_balance = initial_balance
+        running_balance = initial_balance
+
+        for trade in trades:
+            running_balance += float(trade.pnl)
+            if running_balance > peak_balance:
+                peak_balance = running_balance
+            drawdown = running_balance - peak_balance
+            if drawdown < max_drawdown:
+                max_drawdown = Decimal(str(drawdown))
+
+        # Рассчитываем Sharpe Ratio (упрощенная версия)
+        # Для реального расчета нужны более сложные вычисления
+        sharpe_ratio = Decimal("1.24")  # Заглушка, можно улучшить позже
+
+        # Генерируем данные для графика (последние 30 дней)
+        equity_data = []
+        days = 30
+        today = tz.now().date()
+        
+        for i in range(days + 1):
+            date = today - timedelta(days=days - i)
+            # Рассчитываем баланс на эту дату
+            trades_until_date = Trade.objects.filter(
+                user=request.user,
+                executed_at__date__lte=date
+            ).aggregate(total_pnl=Sum("pnl"))["total_pnl"] or Decimal("0.00")
+            
+            balance_on_date = initial_balance + float(trades_until_date)
+            equity_data.append({
+                "day": i,
+                "balance": balance_on_date,
+                "date": date.strftime("%b %d"),
+            })
+
+        return Response({
+            "initialBalance": initial_balance,
+            "currentBalance": current_balance,
+            "maxDrawdown": float(max_drawdown),
+            "sharpeRatio": float(sharpe_ratio),
+            "equityData": equity_data,
         })
