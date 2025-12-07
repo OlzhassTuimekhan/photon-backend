@@ -187,7 +187,10 @@ class MarketAgentIntegration:
             self.adapter.update_status("RUNNING")
             self.adapter.log("info", f"Processing market data for {symbol.symbol}")
             
-            # Получаем обработанные данные с анализом
+            # Сначала получаем и обрабатываем данные
+            market_agent.get_processed_data(analyze=True)
+            
+            # Теперь можем отправить данные Decision Agent
             market_message = market_agent.send_to_decision_agent(transport="direct")
             
             # Сохраняем в MarketData если нужно
