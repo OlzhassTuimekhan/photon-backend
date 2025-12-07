@@ -176,9 +176,15 @@ class DecisionMakingAgent:
             features = self._extract_features(market_data)
             
             # Make decision using AI or rules
+            # ВАЖНО: AI модель используется по умолчанию, rule-based только как fallback
             if self.enable_ai and self.is_trained:
+                logger.info(f"Using AI model ({self.model_type}) for decision making")
                 decision = self._make_ai_decision(features, market_data)
             else:
+                if not self.enable_ai:
+                    logger.warning("AI disabled, using rule-based fallback")
+                elif not self.is_trained:
+                    logger.warning("AI model not trained yet, using rule-based fallback (will train after this decision)")
                 decision = self._make_rule_based_decision(features, market_data)
             
             # Apply risk management
@@ -198,8 +204,17 @@ class DecisionMakingAgent:
             })
             
             # Train model if needed (initial training)
+            # ВАЖНО: Модель обучается автоматически при первом использовании
             if self.enable_ai and not self.is_trained:
+                logger.info("Training AI model on first use with historical data...")
                 self._train_initial_model()
+                logger.info(f"AI model trained successfully. Model type: {self.model_type}, Trained: {self.is_trained}")
+                # После обучения пересчитываем решение с использованием AI модели
+                if self.is_trained:
+                    logger.info("Recomputing decision with trained AI model...")
+                    decision = self._make_ai_decision(features, market_data)
+                    # Применяем risk management к новому решению
+                    decision = self._apply_risk_management(decision, market_data)
             
             # Continuous learning: retrain periodically
             if self.enable_ai and self.is_trained and self.enable_continuous_learning:
