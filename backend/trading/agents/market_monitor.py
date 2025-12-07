@@ -44,7 +44,8 @@ class MarketMonitoringAgent:
         history_size: int = 100,
         indicators: Optional[List[str]] = None,
         max_retries: int = 3,
-        backoff_factor: float = 2.0
+        backoff_factor: float = 2.0,
+        request_delay: float = 2.0  # Задержка перед каждым запросом для обхода rate limiting
     ):
         """
         Initialize market monitoring agent.
@@ -69,7 +70,7 @@ class MarketMonitoringAgent:
         # Caching
         self.enable_cache = enable_cache
         self.cache_path = cache_path
-        self.cache_ttl = 3600  # 1 hour by default
+        self.cache_ttl = 7200  # 2 hours by default (увеличено для обхода блокировок)
         
         # State history
         self.history_size = history_size
@@ -81,6 +82,7 @@ class MarketMonitoringAgent:
         # Retry parameters
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
+        self.request_delay = request_delay
         
         # Alert callback
         self.alert_callback: Optional[Callable[[dict], None]] = None
@@ -116,13 +118,18 @@ class MarketMonitoringAgent:
             try:
                 logger.info(f"Loading data for {self.ticker} (period={self.period}, interval={self.interval}, attempt {attempt + 1})")
                 
+                # Задержка перед запросом для обхода rate limiting Yahoo Finance
+                if attempt > 0 or self.request_delay > 0:
+                    time.sleep(self.request_delay)
+                
                 # Load data via yfinance
                 data = yf.download(
                     tickers=self.ticker,
                     period=self.period,
                     interval=self.interval,
                     progress=False,
-                    auto_adjust=False
+                    auto_adjust=False,
+                    timeout=30  # Увеличиваем таймаут
                 )
                 
                 # Check for empty data
@@ -163,7 +170,10 @@ class MarketMonitoringAgent:
                 logger.warning(f"Error loading data (attempt {attempt + 1}/{self.max_retries}): {str(e)}")
                 
                 if attempt < self.max_retries - 1:
+                    # Увеличиваем задержку для обхода блокировки Yahoo Finance
                     wait_time = self.backoff_factor ** attempt
+                    # Минимум 5 секунд между попытками для серверных запросов
+                    wait_time = max(wait_time, 5.0)
                     logger.info(f"Waiting {wait_time:.1f} seconds before retry...")
                     time.sleep(wait_time)
         

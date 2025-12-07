@@ -175,7 +175,10 @@ class Command(BaseCommand):
                         ticker=symbol_code,
                         interval="1h",
                         period="1mo",
-                        enable_cache=True
+                        enable_cache=True,
+                        request_delay=5.0,
+                        max_retries=5,
+                        backoff_factor=3.0
                     )
                     market_message = market_integration.process_and_save(
                         symbol=symbol,

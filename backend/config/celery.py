@@ -10,11 +10,16 @@ app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
 # Настройка периодических задач
+# ВАЖНО: periodic_market_update отключен, т.к. использует MarketDataService (yfinance)
+# Это создавало слишком много запросов к Yahoo Finance и вызывало блокировку (429)
+# Вместо этого используем MarketMonitoringAgent через API endpoints
+# Данные получаются только когда пользователь явно запрашивает через агентов
 app.conf.beat_schedule = {
-    "periodic-market-update": {
-        "task": "trading.tasks.periodic_market_update",
-        "schedule": 60.0,  # Каждую минуту
-    },
+    # Отключено для уменьшения нагрузки на Yahoo Finance
+    # "periodic-market-update": {
+    #     "task": "trading.tasks.periodic_market_update",
+    #     "schedule": 300.0,  # Каждые 5 минут (если нужно включить)
+    # },
 }
 app.conf.timezone = "Asia/Almaty"
 

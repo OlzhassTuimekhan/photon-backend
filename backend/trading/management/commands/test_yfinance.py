@@ -99,7 +99,32 @@ class Command(BaseCommand):
         
         # Итог
         self.stdout.write(self.style.SUCCESS("\n" + "="*70))
-        self.stdout.write(self.style.SUCCESS("✓ YFINANCE РАБОТАЕТ КОРРЕКТНО"))
-        self.stdout.write(self.style.SUCCESS("="*70))
-        self.stdout.write("\nMarketMonitoringAgent должен работать нормально.")
+        
+        # Проверяем результаты
+        tests_passed = 0
+        if YFINANCE_AVAILABLE:
+            tests_passed += 1
+        try:
+            if ticker and not hist.empty:
+                tests_passed += 1
+        except:
+            pass
+        
+        if tests_passed >= 2:
+            self.stdout.write(self.style.SUCCESS("✓ YFINANCE РАБОТАЕТ КОРРЕКТНО"))
+            self.stdout.write(self.style.SUCCESS("="*70))
+            self.stdout.write("\nMarketMonitoringAgent должен работать нормально.")
+        else:
+            self.stdout.write(self.style.ERROR("✗ YFINANCE НЕ РАБОТАЕТ"))
+            self.stdout.write(self.style.ERROR("="*70))
+            self.stdout.write("\nПРОБЛЕМЫ:")
+            self.stdout.write("  - Yahoo Finance блокирует запросы (429 Too Many Requests)")
+            self.stdout.write("  - Нет интернет-соединения")
+            self.stdout.write("  - Проблемы с DNS/прокси")
+            self.stdout.write("\nРЕШЕНИЯ:")
+            self.stdout.write("  1. Добавить задержки между запросами")
+            self.stdout.write("  2. Использовать прокси для обхода блокировки")
+            self.stdout.write("  3. Использовать альтернативные источники (Bybit для крипты)")
+            self.stdout.write("  4. Увеличить кеширование данных")
+            self.stdout.write("  5. Использовать user-agent заголовки")
 

@@ -329,7 +329,10 @@ class DecisionMakerAgentView(APIView):
                     ticker=symbol.symbol,
                     interval=timeframe,
                     period=period,
-                    enable_cache=True
+                    enable_cache=True,
+                    request_delay=5.0,  # Увеличенная задержка для обхода блокировок Yahoo Finance
+                    max_retries=5,  # Больше попыток
+                    backoff_factor=3.0  # Больше времени между попытками
                 )
                 
                 # Получаем обработанные данные с анализом
