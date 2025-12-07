@@ -157,6 +157,15 @@ class Command(BaseCommand):
             if not isinstance(historical_data.index, pd.DatetimeIndex):
                 historical_data.index = pd.to_datetime(historical_data.index)
             
+            # Отладочная информация: показываем реальные даты в данных
+            self.stdout.write(f"\nОтладка: Данные содержат {len(historical_data)} записей")
+            if len(historical_data) > 0:
+                first_date = historical_data.index[0]
+                last_date = historical_data.index[-1]
+                self.stdout.write(f"Первая дата в данных: {first_date}")
+                self.stdout.write(f"Последняя дата в данных: {last_date}")
+                self.stdout.write(f"Запрошенный период: {start_date} - {end_date}")
+            
             # Конвертируем start_date и end_date в тот же тип, что и индекс
             # Используем numpy datetime64 для совместимости
             import numpy as np
@@ -168,10 +177,24 @@ class Command(BaseCommand):
             
             # Фильтруем по датам используя numpy сравнение
             mask = (index_as_numpy >= start_ts) & (index_as_numpy <= end_ts)
-            historical_data = historical_data.loc[mask]
+            filtered_data = historical_data.loc[mask]
+            
+            if filtered_data.empty:
+                self.stdout.write(self.style.WARNING(
+                    f"\n⚠ Нет данных в указанном периоде ({start_date} - {end_date}). "
+                    f"Используем все доступные данные ({first_date} - {last_date})."
+                ))
+                # Используем все данные, если фильтрация не дала результатов
+                # Это нормально для Bybit, который возвращает только последние N свечей
+                historical_data = historical_data
+            else:
+                historical_data = filtered_data
+                self.stdout.write(self.style.SUCCESS(
+                    f"✓ Отфильтровано: {len(historical_data)} записей в запрошенном периоде"
+                ))
             
             if historical_data.empty:
-                self.stdout.write(self.style.ERROR("Нет данных в указанном периоде"))
+                self.stdout.write(self.style.ERROR("Нет данных для симуляции"))
                 return
             
             self.stdout.write(self.style.SUCCESS(
