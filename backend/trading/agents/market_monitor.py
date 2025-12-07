@@ -1042,16 +1042,24 @@ class MarketMonitoringAgent:
         analysis = self.analyze_market_conditions(self.processed_data)
         latest = self.processed_data.iloc[-1]
         
+        # Helper function to safely extract scalar value from Series
+        def get_scalar_value(series, key):
+            """Extract scalar value from Series, handling cases where key returns Series"""
+            value = series[key]
+            if isinstance(value, pd.Series):
+                value = value.iloc[0] if len(value) > 0 else None
+            return value
+        
         # Form standardized message
         message = {
             "timestamp": datetime.now().isoformat() + "Z",
             "ticker": self.ticker,
             "ohlcv": {
-                "open": float(latest['open']),
-                "high": float(latest['high']),
-                "low": float(latest['low']),
-                "close": float(latest['close']),
-                "volume": int(latest['volume'])
+                "open": float(get_scalar_value(latest, 'open')),
+                "high": float(get_scalar_value(latest, 'high')),
+                "low": float(get_scalar_value(latest, 'low')),
+                "close": float(get_scalar_value(latest, 'close')),
+                "volume": int(get_scalar_value(latest, 'volume'))
             },
             "indicators": {},
             "analysis": analysis,
@@ -1066,7 +1074,9 @@ class MarketMonitoringAgent:
                    'macd', 'macd_signal', 'macd_hist',
                    'bb_upper', 'bb_lower', 'bb_mid']:
             if col in latest:
-                message["indicators"][col] = float(latest[col])
+                value = get_scalar_value(latest, col)
+                if value is not None and not pd.isna(value):
+                    message["indicators"][col] = float(value)
         
         # Handle transport
         if transport == "direct":
