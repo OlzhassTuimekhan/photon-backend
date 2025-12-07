@@ -211,7 +211,7 @@ class Command(BaseCommand):
         decision_agent = DecisionMakingAgent(
             model_type="random_forest",
             risk_tolerance="medium",
-            min_confidence=0.15,  # Очень низкий порог для симуляции (чтобы модель делала больше сделок)
+            min_confidence=0.05,  # Очень низкий порог для симуляции (чтобы модель делала больше сделок)
             enable_ai=True,
             use_historical_training=True,
             training_ticker=symbol_code,

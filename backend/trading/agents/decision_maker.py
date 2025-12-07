@@ -450,13 +450,20 @@ class DecisionMakingAgent:
         confidence = decision.get("confidence", 0.0)
         risk_score = decision.get("risk_score", 0.5)
         
-        # Check minimum confidence
+        # Check minimum confidence (более мягкая проверка для низких порогов)
         if confidence < self.min_confidence and action != "HOLD":
-            logger.info(f"Decision rejected: confidence {confidence:.2f} < min {self.min_confidence}")
-            return self._create_hold_decision(market_data, "Low confidence")
+            # Если min_confidence очень низкий (< 0.1), разрешаем действия с еще меньшей уверенностью
+            if self.min_confidence < 0.1 and confidence >= self.min_confidence * 0.5:
+                logger.debug(f"Allowing low confidence action: {confidence:.2f} >= {self.min_confidence * 0.5:.2f}")
+            else:
+                logger.info(f"Decision rejected: confidence {confidence:.2f} < min {self.min_confidence}")
+                return self._create_hold_decision(market_data, "Low confidence")
         
-        # Check risk score
+        # Check risk score (более мягкая проверка для симуляции)
         max_risk = self.risk_params.get("max_drawdown", 0.15)
+        # Если min_confidence очень низкий, увеличиваем допустимый риск
+        if self.min_confidence < 0.1:
+            max_risk = max_risk * 1.5  # Увеличиваем допустимый риск на 50%
         if risk_score > max_risk and action != "HOLD":
             logger.info(f"Decision rejected: risk score {risk_score:.2f} > max {max_risk}")
             return self._create_hold_decision(market_data, "Risk too high")

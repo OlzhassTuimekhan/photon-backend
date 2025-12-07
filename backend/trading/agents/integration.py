@@ -404,8 +404,13 @@ class ExecutionAgentIntegration:
                 
                 # Обновляем счет
                 cost = quantity * executed_price
-                account.balance -= cost
                 account.free_cash -= cost
+                # Баланс = free_cash + стоимость всех открытых позиций
+                # Пересчитываем баланс после обновления позиций
+                open_positions = Position.objects.filter(user=self.user, is_open=True)
+                used_margin = sum(pos.current_price * pos.quantity for pos in open_positions if pos.current_price)
+                account.used_margin = used_margin
+                account.balance = account.free_cash + used_margin
                 account.save()
                 
             elif action == "SELL":
@@ -433,8 +438,13 @@ class ExecutionAgentIntegration:
                     
                     # Обновляем счет
                     revenue = quantity * executed_price
-                    account.balance += revenue
                     account.free_cash += revenue
+                    # Баланс = free_cash + стоимость всех открытых позиций
+                    # Пересчитываем баланс после обновления позиций
+                    open_positions = Position.objects.filter(user=self.user, is_open=True)
+                    used_margin = sum(pos.current_price * pos.quantity for pos in open_positions if pos.current_price)
+                    account.used_margin = used_margin
+                    account.balance = account.free_cash + used_margin
                     account.save()
                 else:
                     # НЕТ открытой позиции - разрешаем SELL для симуляции
