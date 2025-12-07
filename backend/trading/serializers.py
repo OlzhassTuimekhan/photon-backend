@@ -253,10 +253,12 @@ class MessageSerializer(serializers.ModelSerializer):
             "timestamp",
             "from_agent",
             "to_agent",
+            "from_agent_type",
+            "to_agent_type",
             "message_type",
             "payload",
         ]
-        read_only_fields = ["id", "timestamp"]
+        read_only_fields = ["id", "timestamp", "from_agent_type", "to_agent_type"]
 
     def get_from_agent_type(self, obj):
         """Преобразует from_agent в формат фронтенда"""
