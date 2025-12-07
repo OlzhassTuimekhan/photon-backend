@@ -8,7 +8,6 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from clients.ml_client import call_agent1, call_agent2, call_agent3
 
 from trading.models import Symbol, MarketData, TradingDecision, AgentStatus, Account, Position, Trade
 from trading.serializers import (
@@ -246,17 +245,16 @@ class MarketMonitorAgentView(APIView):
         )
 
         if action_type == "start":
-            ml_response = call_agent1({"user_id": request.user.id})
-
+            # Запускаем Celery задачу
+            task = start_market_monitoring.delay(request.user.id)
             status_obj.status = "RUNNING"
-            status_obj.metadata = {}
+            status_obj.metadata = {"task_id": task.id}
             status_obj.last_activity = timezone.now()
             status_obj.save()
-
             return Response({
                 "status": "started",
                 "message": "Market monitoring agent started",
-                "ml_response": ml_response,
+                "task_id": task.id,
             })
 
         elif action_type == "stop":
@@ -318,22 +316,17 @@ class DecisionMakerAgentView(APIView):
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR
                     )
 
-            # ---- ВЫЗОВ ML API ----
-            ml_result = call_agent2({
-                "symbol": symbol.symbol,
-                "price": str(latest_data.price),
-                "timestamp": latest_data.timestamp.isoformat()
-            })
-
+            # TODO: Здесь будет вызов AI модели для принятия решения
+            # Пока возвращаем заглушку
             try:
                 decision = TradingDecision.objects.create(
                     user=request.user,
                     symbol=symbol,
-                    decision=ml_result.get("decision", "HOLD"),
-                    confidence=Decimal(str(ml_result.get("confidence", 50.0))),
+                    decision="HOLD",  # Заглушка
+                    confidence=Decimal("50.0"),
                     market_data=latest_data,
-                    reasoning=ml_result.get("reasoning", "No reasoning provided by ML."),
-                    metadata=ml_result,
+                    reasoning="AI model not implemented yet. This is a placeholder decision.",
+                    metadata={},
                 )
                 serializer = TradingDecisionSerializer(decision)
                 return Response(serializer.data)
@@ -363,14 +356,6 @@ class ExecutionAgentView(APIView):
             defaults={"status": "IDLE"},
         )
         return Response(AgentStatusSerializer(status_obj).data)
-
-    def post(self, request):
-        """Выполнить сделку через Execution Agent"""
-        ml_response = call_agent3({"user_id": request.user.id})
-        return Response({
-            "status": "executed",
-            "ml_response": ml_response
-        })
 
 
 class PortfolioView(APIView):
