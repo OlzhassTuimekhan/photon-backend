@@ -96,15 +96,40 @@ class Command(BaseCommand):
             filename = f"{symbol}_{interval}.csv"
             filepath = os.path.join(output_dir, filename)
 
-            # Убеждаемся, что timestamp в колонках
-            if 'timestamp' in data.columns:
+            # Убеждаемся, что timestamp в колонках и правильно сохранен
+            # Если индекс - это DatetimeIndex, используем его напрямую
+            if isinstance(data.index, pd.DatetimeIndex):
                 data_to_save = data.copy()
+            elif 'timestamp' in data.columns:
+                # Если timestamp в колонках, используем его как индекс
+                data_to_save = data.copy()
+                if not isinstance(data_to_save.index, pd.DatetimeIndex):
+                    data_to_save['timestamp'] = pd.to_datetime(data_to_save['timestamp'], errors='coerce')
+                    data_to_save = data_to_save.set_index('timestamp')
             else:
+                # Иначе создаем timestamp из индекса
                 data_to_save = data.reset_index()
                 if 'timestamp' not in data_to_save.columns:
-                    data_to_save['timestamp'] = data_to_save.index
-
-            data_to_save.to_csv(filepath, index=True)
+                    # Если индекс был DatetimeIndex, используем его
+                    if isinstance(data.index, pd.DatetimeIndex):
+                        data_to_save['timestamp'] = data.index
+                    else:
+                        # Пробуем конвертировать индекс в datetime
+                        data_to_save['timestamp'] = pd.to_datetime(data_to_save.index, errors='coerce')
+                else:
+                    # Убеждаемся, что timestamp - это datetime
+                    data_to_save['timestamp'] = pd.to_datetime(data_to_save['timestamp'], errors='coerce')
+                data_to_save = data_to_save.set_index('timestamp')
+            
+            # Убеждаемся, что индекс - это DatetimeIndex
+            if not isinstance(data_to_save.index, pd.DatetimeIndex):
+                data_to_save.index = pd.to_datetime(data_to_save.index, errors='coerce')
+            
+            # Удаляем строки с невалидными датами
+            data_to_save = data_to_save.dropna(subset=[data_to_save.index.name if data_to_save.index.name else None])
+            
+            # Сохраняем с правильным форматом дат
+            data_to_save.to_csv(filepath, index=True, date_format='%Y-%m-%d %H:%M:%S')
             self.stdout.write(self.style.SUCCESS(f"✓ Данные сохранены в: {filepath}"))
 
             # Показываем статистику

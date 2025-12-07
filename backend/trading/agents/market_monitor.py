@@ -504,7 +504,15 @@ class MarketMonitoringAgent:
                     try:
                         logger.info(f"Loading data from CSV file: {filepath}")
                         # Пробуем разные форматы CSV
-                        data = pd.read_csv(filepath, index_col=0, parse_dates=True)
+                        data = pd.read_csv(filepath, index_col=0, parse_dates=True, date_format='mixed')
+                        # Убеждаемся, что индекс - это DatetimeIndex
+                        if not isinstance(data.index, pd.DatetimeIndex):
+                            # Пробуем конвертировать индекс в datetime
+                            data.index = pd.to_datetime(data.index, errors='coerce')
+                            # Если не получилось, пробуем использовать колонку timestamp если есть
+                            if 'timestamp' in data.columns:
+                                data = data.set_index('timestamp')
+                                data.index = pd.to_datetime(data.index, errors='coerce')
                         
                         # Проверяем наличие нужных колонок
                         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -566,11 +574,17 @@ class MarketMonitoringAgent:
                 except Exception:
                     # Fallback to CSV if parquet doesn't work
                     if os.path.exists(cache_file_csv):
-                        data = pd.read_csv(cache_file_csv, index_col=0, parse_dates=True)
+                        data = pd.read_csv(cache_file_csv, index_col=0, parse_dates=True, date_format='mixed')
+                        # Убеждаемся, что индекс - это DatetimeIndex
+                        if not isinstance(data.index, pd.DatetimeIndex):
+                            data.index = pd.to_datetime(data.index, errors='coerce')
                         return data
                     return None
             else:
-                data = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+                data = pd.read_csv(cache_file, index_col=0, parse_dates=True, date_format='mixed')
+                # Убеждаемся, что индекс - это DatetimeIndex
+                if not isinstance(data.index, pd.DatetimeIndex):
+                    data.index = pd.to_datetime(data.index, errors='coerce')
                 return data
         except Exception as e:
             logger.warning(f"Error loading from cache: {e}")

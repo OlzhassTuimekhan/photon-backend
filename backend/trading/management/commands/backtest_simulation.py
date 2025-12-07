@@ -292,31 +292,71 @@ class Command(BaseCommand):
                 
                 # Подготовка данных рынка
                 # После preprocess колонки в нижнем регистре (open, close, а не Open, Close)
+                # row - это pandas Series, нужно правильно извлекать значения
+                def get_value(series, key, default=0):
+                    """Безопасное извлечение значения из Series"""
+                    try:
+                        if key in series.index:
+                            val = series[key]
+                            # Если это Series (не должно быть, но на всякий случай)
+                            if isinstance(val, pd.Series):
+                                return float(val.iloc[0]) if len(val) > 0 else default
+                            # Если это скалярное значение
+                            if pd.isna(val):
+                                return default
+                            return float(val)
+                        # Пробуем альтернативные имена колонок
+                        alt_key = key.capitalize() if key.islower() else key.lower()
+                        if alt_key in series.index:
+                            val = series[alt_key]
+                            if isinstance(val, pd.Series):
+                                return float(val.iloc[0]) if len(val) > 0 else default
+                            if pd.isna(val):
+                                return default
+                            return float(val)
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                    return default
+                
+                def get_str_value(series, key, default=""):
+                    """Безопасное извлечение строкового значения из Series"""
+                    try:
+                        if key in series.index:
+                            val = series[key]
+                            if isinstance(val, pd.Series):
+                                return str(val.iloc[0]) if len(val) > 0 else default
+                            if pd.isna(val):
+                                return default
+                            return str(val)
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                    return default
+                
                 market_message = {
                     "timestamp": timestamp_aware.isoformat(),
                     "ticker": symbol_code,
                     "ohlcv": {
-                        "open": float(row.get("open", row.get("Open", 0))),
-                        "high": float(row.get("high", row.get("High", 0))),
-                        "low": float(row.get("low", row.get("Low", 0))),
-                        "close": float(row.get("close", row.get("Close", 0))),
-                        "volume": float(row.get("volume", row.get("Volume", 0))),
+                        "open": get_value(row, "open", get_value(row, "Open", 0)),
+                        "high": get_value(row, "high", get_value(row, "High", 0)),
+                        "low": get_value(row, "low", get_value(row, "Low", 0)),
+                        "close": get_value(row, "close", get_value(row, "Close", 0)),
+                        "volume": get_value(row, "volume", get_value(row, "Volume", 0)),
                     },
                     "indicators": {
-                        "sma10": float(row.get("sma10", 0)),
-                        "sma20": float(row.get("sma20", 0)),
-                        "rsi14": float(row.get("rsi14", 50.0)),
-                        "macd": float(row.get("macd", 0)),
-                        "macd_hist": float(row.get("macd_hist", 0)),
-                        "volatility": float(row.get("volatility", 0)),
-                        "price_change": float(row.get("price_change", 0)),
+                        "sma10": get_value(row, "sma10", 0),
+                        "sma20": get_value(row, "sma20", 0),
+                        "rsi14": get_value(row, "rsi14", 50.0),
+                        "macd": get_value(row, "macd", 0),
+                        "macd_hist": get_value(row, "macd_hist", 0),
+                        "volatility": get_value(row, "volatility", 0),
+                        "price_change": get_value(row, "price_change", 0),
                     },
                     "analysis": {
-                        "trend": row.get("trend", "sideways"),
-                        "strength": float(row.get("strength", 0.5)),
+                        "trend": get_str_value(row, "trend", "sideways"),
+                        "strength": get_value(row, "strength", 0.5),
                         "signals": {
-                            "rsi_state": row.get("rsi_state", "neutral"),
-                            "sma_cross": int(row.get("sma_cross", 0)),
+                            "rsi_state": get_str_value(row, "rsi_state", "neutral"),
+                            "sma_cross": int(get_value(row, "sma_cross", 0)),
                         }
                     },
                     "meta": {
