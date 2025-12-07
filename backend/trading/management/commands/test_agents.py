@@ -165,8 +165,9 @@ class Command(BaseCommand):
                     risk_tolerance="medium",
                     min_confidence=0.55,
                     enable_ai=True,
-                    use_historical_training=False,  # Отключаем историческое обучение в тестах (yfinance заблокирован)
-                    training_ticker=symbol_code  # Если включено, используем тот же тикер
+                    use_historical_training=True,  # Используем реальные данные для обучения
+                    training_ticker=symbol_code,  # Используем тот же тикер (для крипты сработает Bybit fallback)
+                    training_period="1mo"  # Месяц данных достаточно для обучения
                 )
 
                 decision = decision_integration.make_decision(

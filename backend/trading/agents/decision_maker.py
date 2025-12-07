@@ -537,11 +537,15 @@ class DecisionMakingAgent:
             logger.info(f"Fetching historical data for {ticker} (period: {self.training_period})")
             
             # Get historical data
+            # Используем те же настройки, что и в основном агенте (для Bybit fallback)
             market_agent = MarketMonitoringAgent(
                 ticker=ticker,
                 interval="1d",  # Daily data for training
                 period=self.training_period,
-                enable_cache=True
+                enable_cache=True,
+                request_delay=5.0,  # Задержка для обхода блокировок
+                max_retries=5,  # Больше попыток
+                backoff_factor=3.0  # Больше времени между попытками
             )
             
             # Get processed data with indicators
