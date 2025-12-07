@@ -7,6 +7,7 @@
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal
+import pandas as pd
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
 from django.utils import timezone as tz
@@ -152,10 +153,18 @@ class Command(BaseCommand):
             if 'timestamp' in historical_data.columns:
                 historical_data = historical_data.set_index('timestamp')
             
+            # Убеждаемся, что индекс - это DatetimeIndex
+            if not isinstance(historical_data.index, pd.DatetimeIndex):
+                historical_data.index = pd.to_datetime(historical_data.index)
+            
+            # Конвертируем start_date и end_date в pandas Timestamp для корректного сравнения
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+            
             # Фильтруем по датам
             historical_data = historical_data[
-                (historical_data.index >= start_date) & 
-                (historical_data.index <= end_date)
+                (historical_data.index >= start_ts) & 
+                (historical_data.index <= end_ts)
             ]
             
             if historical_data.empty:
