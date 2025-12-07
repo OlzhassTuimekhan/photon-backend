@@ -8,6 +8,9 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from ml_clients import call_agent1
+from ml_clients import call_agent2
+from ml_clients import call_agent3
 
 from trading.models import Symbol, MarketData, TradingDecision, AgentStatus
 from trading.serializers import (
@@ -241,18 +244,20 @@ class MarketMonitorAgentView(APIView):
             defaults={"status": "IDLE"},
         )
 
-        if action_type == "start":
-            # Запускаем Celery задачу
-            task = start_market_monitoring.delay(request.user.id)
-            status_obj.status = "RUNNING"
-            status_obj.metadata = {"task_id": task.id}
-            status_obj.last_activity = timezone.now()
-            status_obj.save()
-            return Response({
-                "status": "started",
-                "message": "Market monitoring agent started",
-                "task_id": task.id,
-            })
+       if action_type == "start":
+           ml_response = call_agent1({"user_id": request.user.id})
+
+           status_obj.status = "RUNNING"
+           status_obj.metadata = {}
+           status_obj.last_activity = timezone.now()
+           status_obj.save()
+
+           return Response({
+               "status": "started",
+               "message": "Market monitoring agent started",
+               "ml_response": ml_response,
+           })
+
         elif action_type == "stop":
             # Останавливаем задачу
             if status_obj.metadata.get("task_id"):
@@ -312,18 +317,22 @@ class DecisionMakerAgentView(APIView):
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR
                     )
 
-            # TODO: Здесь будет вызов AI модели для принятия решения
-            # Пока возвращаем заглушку
-            try:
-                decision = TradingDecision.objects.create(
-                    user=request.user,
-                    symbol=symbol,
-                    decision="HOLD",  # Заглушка
-                    confidence=Decimal("50.0"),
-                    market_data=latest_data,
-                    reasoning="AI model not implemented yet. This is a placeholder decision.",
-                    metadata={},
-                )
+           # ---- ВЫЗОВ ML API ----
+           ml_result = call_agent2({
+               "symbol": symbol.symbol,
+               "price": str(latest_data.price),
+               "timestamp": latest_data.timestamp.isoformat()
+           })
+
+           decision = TradingDecision.objects.create(
+               user=request.user,
+               symbol=symbol,
+               decision=ml_result.get("decision", "HOLD"),
+               confidence=Decimal(str(ml_result.get("confidence", 50.0))),
+               market_data=latest_data,
+               reasoning=ml_result.get("reasoning", "No reasoning provided by ML."),
+               metadata=ml_result,
+           )
                 serializer = TradingDecisionSerializer(decision)
                 return Response(serializer.data)
             except Exception as decision_error:
@@ -353,3 +362,10 @@ class ExecutionAgentView(APIView):
         )
         return Response(AgentStatusSerializer(status_obj).data)
 
+
+    def post(self, request):
+        ml_response = call_agent3({"user_id": request.user.id})
+        return Response({
+            "status": "executed",
+            "ml_response": ml_response
+        })
