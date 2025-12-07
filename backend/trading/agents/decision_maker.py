@@ -79,7 +79,7 @@ class DecisionMakingAgent:
         
         # AI Model
         self.model = None
-        self.scaler = StandardScaler()
+        self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
         self.model_path = model_path
         self.is_trained = False
         
@@ -235,6 +235,8 @@ class DecisionMakingAgent:
         """Make decision using trained AI model."""
         try:
             # Scale features
+            if self.scaler is None:
+                raise ValueError("Scaler not initialized")
             features_scaled = self.scaler.transform(features)
             
             # Predict
@@ -492,6 +494,8 @@ class DecisionMakingAgent:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
         # Scale features
+        if self.scaler is None:
+            raise ValueError("Scaler not initialized - sklearn not available")
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
@@ -682,6 +686,9 @@ class DecisionMakingAgent:
     def _save_model(self, path: str):
         """Save trained model to disk."""
         try:
+            if self.scaler is None:
+                logger.warning("Cannot save model: scaler not initialized")
+                return
             os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
             with open(path, 'wb') as f:
                 pickle.dump({
