@@ -83,6 +83,13 @@ class DecisionMakingAgent:
         self.model_path = model_path
         self.is_trained = False
         
+        # Continuous learning settings
+        self.enable_continuous_learning = True  # Включить постоянное обучение
+        self.retrain_interval = 10  # Переобучать каждые N новых решений
+        self.retrain_min_samples = 50  # Минимум новых samples для переобучения
+        self.decisions_since_retrain = 0  # Счетчик решений с последнего переобучения
+        self.last_retrain_time = None  # Время последнего переобучения
+        
         # Decision history
         self.history_size = history_size
         self.decision_history: deque = deque(maxlen=history_size)
@@ -182,9 +189,20 @@ class DecisionMakingAgent:
                 "price": decision["price"]
             })
             
-            # Train model if needed (online learning)
+            # Train model if needed (initial training)
             if self.enable_ai and not self.is_trained:
                 self._train_initial_model()
+            
+            # Continuous learning: retrain periodically
+            if self.enable_ai and self.is_trained and self.enable_continuous_learning:
+                self.decisions_since_retrain += 1
+                if self.decisions_since_retrain >= self.retrain_interval:
+                    logger.info(f"Triggering continuous learning retrain (decisions since last retrain: {self.decisions_since_retrain})")
+                    try:
+                        self._retrain_with_real_data()
+                        self.decisions_since_retrain = 0
+                    except Exception as e:
+                        logger.warning(f"Continuous learning retrain failed: {e}, continuing with current model")
             
             return decision
             
@@ -686,6 +704,224 @@ class DecisionMakingAgent:
         y = np.array(y)
         
         return X, y
+    
+    def _retrain_with_real_data(self):
+        """
+        Переобучает модель на реальных данных из БД (решения + результаты сделок).
+        Использует данные из TradingDecision и Trade для обучения на реальных результатах.
+        """
+        if not self.enable_ai:
+            return
+        
+        try:
+            # Пробуем получить данные из БД через Django ORM
+            # Это работает только если вызывается из Django контекста
+            try:
+                from django.contrib.auth import get_user_model
+                from trading.models import TradingDecision, Trade, MarketData
+                from django.db.models import Q, F
+                from datetime import timedelta
+                from django.utils import timezone as tz
+                
+                # Получаем пользователя из контекста (если доступен)
+                # Если нет - используем исторические данные
+                user = getattr(self, '_django_user', None)
+                
+                if user:
+                    logger.info("Collecting real trading data from database for retraining...")
+                    
+                    # Получаем решения с выполненными сделками за последние 30 дней
+                    cutoff_date = tz.now() - timedelta(days=30)
+                    decisions_with_trades = TradingDecision.objects.filter(
+                        user=user,
+                        created_at__gte=cutoff_date,
+                        decision__in=["BUY", "SELL"]
+                    ).select_related("symbol", "market_data").prefetch_related("symbol__trades")
+                    
+                    training_samples = []
+                    
+                    for decision in decisions_with_trades:
+                        # Получаем связанные сделки для этого решения
+                        trades = Trade.objects.filter(
+                            user=user,
+                            symbol=decision.symbol,
+                            executed_at__gte=decision.created_at,
+                            executed_at__lte=decision.created_at + timedelta(hours=24)  # Сделка в течение дня
+                        ).order_by("executed_at")
+                        
+                        if not trades.exists():
+                            continue
+                        
+                        # Берем первую сделку после решения
+                        trade = trades.first()
+                        
+                        # Получаем market_data для извлечения фичей
+                        if not decision.market_data:
+                            continue
+                        
+                        market_data_obj = decision.market_data
+                        
+                        # Извлекаем фичи из metadata решения (там сохранены индикаторы)
+                        metadata = decision.metadata or {}
+                        indicators = metadata.get("indicators", {})
+                        analysis = metadata.get("analysis", {})
+                        
+                        # Формируем фичи (те же 14 признаков)
+                        features = []
+                        
+                        # Price features
+                        features.append(float(market_data_obj.price))
+                        features.append(float(market_data_obj.volume or 0))
+                        change_pct = float(market_data_obj.change_percent or 0)
+                        features.append(change_pct)
+                        
+                        # Technical indicators
+                        features.append(float(indicators.get("sma10", 0.0)))
+                        features.append(float(indicators.get("sma20", 0.0)))
+                        features.append(float(indicators.get("rsi14", 50.0)))
+                        features.append(float(indicators.get("macd", 0.0)))
+                        features.append(float(indicators.get("macd_hist", 0.0)))
+                        features.append(float(indicators.get("volatility", 0.0)))
+                        
+                        # Analysis features
+                        trend = analysis.get("trend", "sideways")
+                        trend_encoded = {"bull": 1.0, "bear": -1.0, "sideways": 0.0}.get(trend, 0.0)
+                        features.append(trend_encoded)
+                        features.append(float(analysis.get("strength", 0.5)))
+                        
+                        # RSI state
+                        rsi_state = analysis.get("signals", {}).get("rsi_state", "neutral")
+                        rsi_encoded = {"overbought": 1.0, "oversold": -1.0, "neutral": 0.0}.get(rsi_state, 0.0)
+                        features.append(rsi_encoded)
+                        
+                        # SMA crossover
+                        sma_cross = analysis.get("signals", {}).get("sma_cross", 0)
+                        features.append(float(sma_cross))
+                        
+                        # Определяем label на основе результата сделки
+                        # Label должен отражать, какое действие было бы правильным в этой ситуации
+                        if trade.pnl is not None:
+                            pnl = float(trade.pnl)
+                            # Если PnL положительный - решение было правильным, используем то же действие
+                            # Если PnL отрицательный - решение было неправильным, используем противоположное
+                            if pnl > 0:
+                                # Прибыльная сделка - решение было правильным
+                                label_map = {"BUY": 2, "SELL": 0}
+                                label = label_map.get(decision.decision, 1)
+                            elif pnl < 0:
+                                # Убыточная сделка - решение было неправильным, противоположное действие
+                                if decision.decision == "BUY":
+                                    label = 0  # SELL было бы лучше
+                                elif decision.decision == "SELL":
+                                    label = 2  # BUY было бы лучше
+                                else:
+                                    label = 1  # HOLD
+                            else:
+                                label = 1  # HOLD если PnL = 0
+                        else:
+                            # Если PnL еще не рассчитан, используем исходное решение
+                            label_map = {"BUY": 2, "SELL": 0, "HOLD": 1}
+                            label = label_map.get(decision.decision, 1)
+                        
+                        training_samples.append((features, label))
+                    
+                    if len(training_samples) >= self.retrain_min_samples:
+                        logger.info(f"Collected {len(training_samples)} real trading samples for retraining")
+                        
+                        # Объединяем с историческими данными
+                        X_new = np.array([s[0] for s in training_samples])
+                        y_new = np.array([s[1] for s in training_samples])
+                        
+                        # Получаем старые данные (исторические)
+                        X_hist, y_hist = self._prepare_historical_training_data()
+                        
+                        if X_hist is not None and len(X_hist) > 0:
+                            # Объединяем старые и новые данные
+                            X_combined = np.vstack([X_hist, X_new])
+                            y_combined = np.hstack([y_hist, y_new])
+                            logger.info(f"Combined training data: {len(X_hist)} historical + {len(X_new)} real = {len(X_combined)} total")
+                        else:
+                            # Используем только новые данные
+                            X_combined = X_new
+                            y_combined = y_new
+                            logger.info(f"Using only real trading data: {len(X_combined)} samples")
+                        
+                        # Переобучаем модель
+                        self._retrain_model(X_combined, y_combined)
+                        from datetime import datetime
+                        self.last_retrain_time = datetime.now()
+                        logger.info("Model retrained successfully with real trading data")
+                    else:
+                        logger.debug(f"Not enough real trading samples ({len(training_samples)} < {self.retrain_min_samples}), skipping retrain")
+                        return
+                        
+                else:
+                    # Нет доступа к Django контексту - используем только исторические данные
+                    logger.info("No Django user context, retraining on historical data only")
+                    X, y = self._prepare_historical_training_data()
+                    if X is not None and len(X) >= self.retrain_min_samples:
+                        self._retrain_model(X, y)
+                        from datetime import datetime
+                        self.last_retrain_time = datetime.now()
+                    else:
+                        logger.warning("Not enough historical data for retraining")
+                        return
+                        
+            except ImportError:
+                # Django не доступен - используем только исторические данные
+                logger.info("Django not available, retraining on historical data only")
+                X, y = self._prepare_historical_training_data()
+                if X is not None and len(X) >= self.retrain_min_samples:
+                    self._retrain_model(X, y)
+                    self.last_retrain_time = datetime.now()
+                else:
+                    logger.warning("Not enough historical data for retraining")
+                    return
+                    
+        except Exception as e:
+            logger.error(f"Error in continuous learning retrain: {e}", exc_info=True)
+            # Не прерываем работу, просто логируем ошибку
+    
+    def _retrain_model(self, X: np.ndarray, y: np.ndarray):
+        """
+        Переобучает модель на новых данных.
+        
+        Args:
+            X: Массив фичей
+            y: Массив меток
+        """
+        if not self.enable_ai or self.scaler is None:
+            return
+        
+        logger.info(f"Retraining model on {len(X)} samples...")
+        
+        # Разделяем данные
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        # Переобучаем scaler на всех данных
+        self.scaler.fit(X_train)
+        X_train_scaled = self.scaler.transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        # Переобучаем модель
+        if self.model_type == "random_forest":
+            self.model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10)
+        elif self.model_type == "gradient_boosting":
+            self.model = GradientBoostingClassifier(n_estimators=100, random_state=42, max_depth=5)
+        else:
+            self.model = RandomForestClassifier(n_estimators=100, random_state=42)
+        
+        self.model.fit(X_train_scaled, y_train)
+        
+        # Оцениваем
+        train_score = self.model.score(X_train_scaled, y_train)
+        test_score = self.model.score(X_test_scaled, y_test)
+        
+        logger.info(f"Model retrained. Train accuracy: {train_score:.3f}, Test accuracy: {test_score:.3f}")
+        
+        # Сохраняем модель если путь указан
+        if self.model_path:
+            self._save_model(self.model_path)
     
     def _save_model(self, path: str):
         """Save trained model to disk."""

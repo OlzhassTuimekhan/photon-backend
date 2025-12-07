@@ -261,6 +261,9 @@ class DecisionAgentIntegration:
             risk_tolerance = self.adapter.get_risk_tolerance()
             min_confidence = self.adapter.get_confidence_threshold()
             
+            # Передаем пользователя в агент для continuous learning
+            decision_agent._django_user = self.user
+            
             # Принимаем решение
             ai_decision = decision_agent.receive_market_data(market_message)
             
