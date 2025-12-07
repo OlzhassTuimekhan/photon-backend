@@ -164,7 +164,9 @@ class Command(BaseCommand):
                     model_type="random_forest",
                     risk_tolerance="medium",
                     min_confidence=0.55,
-                    enable_ai=True
+                    enable_ai=True,
+                    use_historical_training=False,  # Отключаем историческое обучение в тестах (yfinance заблокирован)
+                    training_ticker=symbol_code  # Если включено, используем тот же тикер
                 )
 
                 decision = decision_integration.make_decision(
@@ -233,9 +235,9 @@ class Command(BaseCommand):
                             f"⚠ Сделка отклонена: {execution_result.get('message', 'Unknown reason')}"
                         ))
                 elif decision_action == "HOLD":
-                    self.stdout.write(self.style.INFO("\n[3/3] ExecutionAgent: Пропущено (решение HOLD)"))
+                    self.stdout.write(self.style.SUCCESS("\n[3/3] ExecutionAgent: Пропущено (решение HOLD)"))
                 else:
-                    self.stdout.write(self.style.INFO("\n[3/3] ExecutionAgent: Пропущено (--execute не указан)"))
+                    self.stdout.write(self.style.SUCCESS("\n[3/3] ExecutionAgent: Пропущено (--execute не указан)"))
 
                 # Обновляем баланс
                 account.refresh_from_db()
