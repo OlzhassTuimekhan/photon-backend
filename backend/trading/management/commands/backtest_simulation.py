@@ -80,7 +80,7 @@ class Command(BaseCommand):
         if options.get("end_date"):
             end_date = datetime.strptime(options["end_date"], "%Y-%m-%d")
         else:
-            end_date = tz.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = django_timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         if options.get("start_date"):
             start_date = datetime.strptime(options["start_date"], "%Y-%m-%d")
