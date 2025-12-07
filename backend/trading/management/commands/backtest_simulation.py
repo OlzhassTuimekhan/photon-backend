@@ -5,12 +5,12 @@
 Это позволяет быстро протестировать модель на реальных данных за месяцы.
 """
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 import pandas as pd
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
-from django.utils import timezone as tz
+from django.utils import timezone as django_timezone
 from django.db import transaction
 
 from trading.models import Symbol, Account, UserSettings, Position, Trade, TradingDecision, MarketData
@@ -280,14 +280,14 @@ class Command(BaseCommand):
                 if pd.api.types.is_datetime64_any_dtype(type(timestamp)):
                     # Если timestamp naive, добавляем UTC timezone
                     if timestamp.tzinfo is None:
-                        timestamp_aware = timestamp.replace(tzinfo=tz.utc)
+                        timestamp_aware = timestamp.replace(tzinfo=dt_timezone.utc)
                     else:
                         timestamp_aware = timestamp
                 else:
                     # Если не datetime, конвертируем
                     timestamp_aware = pd.to_datetime(timestamp)
                     if timestamp_aware.tzinfo is None:
-                        timestamp_aware = timestamp_aware.replace(tzinfo=tz.utc)
+                        timestamp_aware = timestamp_aware.replace(tzinfo=dt_timezone.utc)
                 
                 # Подготовка данных рынка
                 # После preprocess колонки в нижнем регистре (open, close, а не Open, Close)
