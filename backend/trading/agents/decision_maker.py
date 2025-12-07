@@ -51,7 +51,8 @@ class DecisionMakingAgent:
         history_size: int = 1000,
         use_historical_training: bool = True,  # Use real historical data for training
         training_ticker: Optional[str] = None,  # Ticker for historical training
-        training_period: str = "1y"  # Period for historical training data
+        training_period: str = "1y",  # Period for historical training data
+        user_id: Optional[int] = None  # ID пользователя для доступа к БД для обучения
     ):
         """
         Initialize decision-making agent.
@@ -67,6 +68,7 @@ class DecisionMakingAgent:
             use_historical_training: If True, train on real historical data (default: True)
             training_ticker: Ticker for historical training data (default: "SPY")
             training_period: Period for historical training ("1y", "6mo", "3mo", "1mo")
+            user_id: ID пользователя для доступа к БД для обучения на реальных данных
         """
         self.model_type = model_type
         self.risk_tolerance = risk_tolerance
@@ -76,6 +78,7 @@ class DecisionMakingAgent:
         self.use_historical_training = use_historical_training
         self.training_ticker = training_ticker
         self.training_period = training_period
+        self.user_id = user_id  # Сохраняем user_id для доступа к БД
         
         # AI Model
         self.model = None
@@ -708,7 +711,29 @@ class DecisionMakingAgent:
     def _retrain_with_real_data(self):
         """
         Переобучает модель на реальных данных из БД (решения + результаты сделок).
-        Использует данные из TradingDecision и Trade для обучения на реальных результатах.
+        
+        ВАЖНО: Логика обучения на реальных данных:
+        
+        1. НАЧАЛЬНОЕ ОБУЧЕНИЕ:
+           - Модель обучается на исторических данных (месяц до текущего момента)
+           - Используются пары: (фичи на день X) → (метка на основе цены дня X+1)
+           - Метка определяется по будущей цене: если цена выросла → BUY, упала → SELL
+        
+        2. ПРИНЯТИЕ РЕШЕНИЯ:
+           - Модель принимает решение на основе текущих данных
+           - Открывается позиция (BUY) или закрывается (SELL)
+           - НО: результат еще неизвестен (нужно ждать закрытия позиции)
+        
+        3. ПЕРЕОБУЧЕНИЕ НА РЕАЛЬНЫХ ДАННЫХ:
+           - Используются только ЗАВЕРШЕННЫЕ сделки (BUY → SELL пары)
+           - PnL известен только после закрытия позиции (SELL)
+           - Только сделки старше 1 дня (чтобы избежать обучения на "свежих" данных)
+           - Фичи берутся из решения на момент открытия позиции (BUY)
+           - Метка определяется по результату: PnL > 0 → решение было правильным
+        
+        4. FALLBACK:
+           - Если реальных данных недостаточно → переобучение на исторических данных
+           - Исторические данные всегда доступны (месяц до текущего момента)
         """
         if not self.enable_ai:
             return
@@ -718,7 +743,7 @@ class DecisionMakingAgent:
             # Это работает только если вызывается из Django контекста
             try:
                 from django.contrib.auth import get_user_model
-                from trading.models import TradingDecision, Trade, MarketData
+                from trading.models import TradingDecision, Trade, Position
                 from django.db.models import Q, F
                 from datetime import timedelta
                 from django.utils import timezone as tz
@@ -727,55 +752,88 @@ class DecisionMakingAgent:
                 # Если нет - используем исторические данные
                 user = getattr(self, '_django_user', None)
                 
+                if not user and self.user_id:
+                    User = get_user_model()
+                    try:
+                        user = User.objects.get(id=self.user_id)
+                    except User.DoesNotExist:
+                        user = None
+                
                 if user:
                     logger.info("Collecting real trading data from database for retraining...")
                     
-                    # Получаем решения с выполненными сделками за последние 30 дней
-                    cutoff_date = tz.now() - timedelta(days=30)
-                    decisions_with_trades = TradingDecision.objects.filter(
+                    # ВАЖНО: Используем только ЗАВЕРШЕННЫЕ сделки (SELL после BUY) с известным PnL
+                    # И только те, которые старше 1 дня (чтобы избежать обучения на "свежих" данных)
+                    min_age = tz.now() - timedelta(days=1)
+                    
+                    # Получаем все SELL сделки (закрытие позиций) с известным PnL
+                    # Это означает, что позиция была открыта (BUY) и закрыта (SELL)
+                    completed_trades = Trade.objects.filter(
                         user=user,
-                        created_at__gte=cutoff_date,
-                        decision__in=["BUY", "SELL"]
-                    ).select_related("symbol", "market_data").prefetch_related("symbol__trades")
+                        action="SELL",  # Только закрывающие сделки
+                        pnl__isnull=False,  # Только с рассчитанным PnL
+                        executed_at__lt=min_age  # Только старые данные (старше 1 дня)
+                    ).select_related('symbol', 'position').order_by('-executed_at')[:self.retrain_min_samples * 2]
+                    
+                    logger.info(f"Found {completed_trades.count()} completed trades (SELL with PnL) for retraining")
                     
                     training_samples = []
                     
-                    for decision in decisions_with_trades:
-                        # Получаем связанные сделки для этого решения
-                        trades = Trade.objects.filter(
-                            user=user,
-                            symbol=decision.symbol,
-                            executed_at__gte=decision.created_at,
-                            executed_at__lte=decision.created_at + timedelta(hours=24)  # Сделка в течение дня
-                        ).order_by("executed_at")
+                    for sell_trade in completed_trades:
+                        # Находим соответствующую BUY сделку (открытие позиции)
+                        # Ищем решение, которое привело к открытию этой позиции
+                        position = sell_trade.position
                         
-                        if not trades.exists():
+                        if not position:
+                            # Если позиция не связана, ищем по символу и времени
+                            buy_trade = Trade.objects.filter(
+                                user=user,
+                                symbol=sell_trade.symbol,
+                                action="BUY",
+                                executed_at__lt=sell_trade.executed_at,
+                                executed_at__gte=sell_trade.executed_at - timedelta(days=7)  # BUY в течение недели до SELL
+                            ).order_by('-executed_at').first()
+                            
+                            if not buy_trade:
+                                continue
+                            
+                            # Ищем решение, которое привело к BUY
+                            decision = TradingDecision.objects.filter(
+                                user=user,
+                                symbol=sell_trade.symbol,
+                                decision="BUY",
+                                created_at__lte=buy_trade.executed_at,
+                                created_at__gte=buy_trade.executed_at - timedelta(hours=1)
+                            ).order_by('-created_at').first()
+                        else:
+                            # Ищем решение, которое привело к открытию позиции
+                            decision = TradingDecision.objects.filter(
+                                user=user,
+                                symbol=sell_trade.symbol,
+                                decision="BUY",
+                                created_at__lte=position.opened_at,
+                                created_at__gte=position.opened_at - timedelta(hours=1)
+                            ).order_by('-created_at').first()
+                        
+                        if not decision or not decision.market_data:
                             continue
                         
-                        # Берем первую сделку после решения
-                        trade = trades.first()
+                        trade = sell_trade  # Используем SELL сделку (закрытие позиции)
                         
-                        # Получаем market_data для извлечения фичей
-                        if not decision.market_data:
-                            continue
-                        
+                        # Извлекаем фичи из метаданных решения (на момент открытия позиции)
                         market_data_obj = decision.market_data
-                        
-                        # Извлекаем фичи из metadata решения (там сохранены индикаторы)
                         metadata = decision.metadata or {}
-                        indicators = metadata.get("indicators", {})
-                        analysis = metadata.get("analysis", {})
                         
-                        # Формируем фичи (те же 14 признаков)
                         features = []
                         
-                        # Price features
+                        # Price features (на момент принятия решения BUY)
                         features.append(float(market_data_obj.price))
                         features.append(float(market_data_obj.volume or 0))
                         change_pct = float(market_data_obj.change_percent or 0)
                         features.append(change_pct)
                         
-                        # Technical indicators
+                        # Technical indicators (из metadata решения)
+                        indicators = metadata.get("indicators", {})
                         features.append(float(indicators.get("sma10", 0.0)))
                         features.append(float(indicators.get("sma20", 0.0)))
                         features.append(float(indicators.get("rsi14", 50.0)))
@@ -784,46 +842,44 @@ class DecisionMakingAgent:
                         features.append(float(indicators.get("volatility", 0.0)))
                         
                         # Analysis features
+                        analysis = metadata.get("analysis", {})
                         trend = analysis.get("trend", "sideways")
                         trend_encoded = {"bull": 1.0, "bear": -1.0, "sideways": 0.0}.get(trend, 0.0)
                         features.append(trend_encoded)
                         features.append(float(analysis.get("strength", 0.5)))
                         
-                        # RSI state
                         rsi_state = analysis.get("signals", {}).get("rsi_state", "neutral")
                         rsi_encoded = {"overbought": 1.0, "oversold": -1.0, "neutral": 0.0}.get(rsi_state, 0.0)
                         features.append(rsi_encoded)
                         
-                        # SMA crossover
                         sma_cross = analysis.get("signals", {}).get("sma_cross", 0)
                         features.append(float(sma_cross))
                         
-                        # Определяем label на основе результата сделки
-                        # Label должен отражать, какое действие было бы правильным в этой ситуации
-                        if trade.pnl is not None:
-                            pnl = float(trade.pnl)
-                            # Если PnL положительный - решение было правильным, используем то же действие
-                            # Если PnL отрицательный - решение было неправильным, используем противоположное
+                        # Определяем label на основе результата ЗАВЕРШЕННОЙ сделки
+                        # PnL известен, т.к. это SELL сделка (закрытие позиции)
+                        pnl = float(trade.pnl)
+                        
+                        # Логика: если BUY привел к прибыли (PnL > 0) - решение было правильным
+                        # Если BUY привел к убытку (PnL < 0) - решение было неправильным
+                        if decision.decision == "BUY":
                             if pnl > 0:
-                                # Прибыльная сделка - решение было правильным
-                                label_map = {"BUY": 2, "SELL": 0}
-                                label = label_map.get(decision.decision, 1)
+                                label = 2  # BUY было правильным решением
                             elif pnl < 0:
-                                # Убыточная сделка - решение было неправильным, противоположное действие
-                                if decision.decision == "BUY":
-                                    label = 0  # SELL было бы лучше
-                                elif decision.decision == "SELL":
-                                    label = 2  # BUY было бы лучше
-                                else:
-                                    label = 1  # HOLD
+                                label = 0  # SELL было бы лучше (противоположное действие)
                             else:
                                 label = 1  # HOLD если PnL = 0
                         else:
-                            # Если PnL еще не рассчитан, используем исходное решение
+                            # Если решение было SELL (что маловероятно для открытия позиции)
                             label_map = {"BUY": 2, "SELL": 0, "HOLD": 1}
                             label = label_map.get(decision.decision, 1)
                         
                         training_samples.append((features, label))
+                        
+                        logger.debug(
+                            f"Training sample: Decision={decision.decision}, "
+                            f"PnL={pnl:.2f}, Label={label}, "
+                            f"Age={(tz.now() - trade.executed_at).days} days"
+                        )
                     
                     if len(training_samples) >= self.retrain_min_samples:
                         logger.info(f"Collected {len(training_samples)} real trading samples for retraining")
@@ -852,7 +908,17 @@ class DecisionMakingAgent:
                         self.last_retrain_time = datetime.now()
                         logger.info("Model retrained successfully with real trading data")
                     else:
-                        logger.debug(f"Not enough real trading samples ({len(training_samples)} < {self.retrain_min_samples}), skipping retrain")
+                        logger.debug(f"Not enough real trading samples ({len(training_samples)} < {self.retrain_min_samples})")
+                        # Если реальных данных недостаточно, переобучаем на исторических данных
+                        logger.info("Retraining on historical data instead (not enough real trading samples)")
+                        X_hist, y_hist = self._prepare_historical_training_data()
+                        if X_hist is not None and len(X_hist) >= 50:
+                            self._retrain_model(X_hist, y_hist)
+                            from datetime import datetime
+                            self.last_retrain_time = datetime.now()
+                            logger.info("Model retrained on historical data")
+                        else:
+                            logger.debug("Not enough historical data for retrain either, skipping")
                         return
                         
                 else:

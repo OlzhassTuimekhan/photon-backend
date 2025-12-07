@@ -358,7 +358,8 @@ class DecisionMakerAgentView(APIView):
                 
                 # Получаем настройки для агента
                 risk_tolerance = user_settings.risk_level or "medium"
-                confidence_threshold = float(user_settings.confidence_threshold or 0.55)
+                # Снижаем порог уверенности по умолчанию для получения больше решений (для обучения)
+                confidence_threshold = float(user_settings.confidence_threshold or 0.50)
                 model_type = user_settings.model_type or "Random Forest"
                 
                 # Маппинг названия модели
