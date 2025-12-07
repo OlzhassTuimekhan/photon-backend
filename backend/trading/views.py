@@ -344,31 +344,10 @@ class DecisionMakerAgentView(APIView):
                 
             except Exception as market_error:
                 logger.error(f"Error getting market data with agent: {str(market_error)}", exc_info=True)
-                # Fallback: используем существующий сервис
-                market_service = get_market_data_service()
-                data = market_service.get_latest_data(symbol.symbol)
-                if not data:
-                    return Response({"detail": "No market data available"}, status=status.HTTP_400_BAD_REQUEST)
-                try:
-                    latest_data = MarketData.objects.create(symbol=symbol, **data)
-                except Exception as create_error:
-                    logger.error(f"Error creating MarketData: {str(create_error)}", exc_info=True)
-                    return Response(
-                        {"detail": f"Ошибка создания данных рынка: {str(create_error)}"},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                    )
-                # Если fallback, возвращаем HOLD
-                decision = TradingDecision.objects.create(
-                    user=request.user,
-                    symbol=symbol,
-                    decision="HOLD",
-                    confidence=Decimal("50.0"),
-                    market_data=latest_data,
-                    reasoning=f"Error getting market data: {str(market_error)}",
-                    metadata={},
+                return Response(
+                    {"detail": f"Ошибка получения данных рынка через MarketMonitoringAgent: {str(market_error)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
-                serializer = TradingDecisionSerializer(decision)
-                return Response(serializer.data)
 
             # Шаг 2: Используем DecisionMakingAgent для принятия решения
             try:

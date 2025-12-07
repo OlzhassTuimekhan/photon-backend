@@ -11,6 +11,7 @@
 import logging
 from typing import Optional, Dict, Any
 from decimal import Decimal
+from datetime import timedelta
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 
@@ -187,6 +188,7 @@ class MarketAgentIntegration:
             self.adapter.update_status("RUNNING")
             self.adapter.log("info", f"Processing market data for {symbol.symbol}")
             
+            # Получаем данные через MarketMonitoringAgent (только наши AI агенты)
             # Сначала получаем и обрабатываем данные
             market_agent.get_processed_data(analyze=True)
             
@@ -216,6 +218,7 @@ class MarketAgentIntegration:
             )
             
             self.adapter.log("info", f"Market data processed and sent to Decision Agent")
+            self.adapter.update_status("IDLE")
             return market_message
             
         except Exception as e:
