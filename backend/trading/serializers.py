@@ -104,26 +104,36 @@ class AccountSerializer(serializers.ModelSerializer):
 
 
 class PositionSerializer(serializers.ModelSerializer):
-    symbol_name = serializers.CharField(source="symbol.symbol", read_only=True)
+    symbol = serializers.CharField(source="symbol.symbol", read_only=True)
+    entryPrice = serializers.DecimalField(source="entry_price", max_digits=20, decimal_places=8, coerce_to_string=False)
+    currentPrice = serializers.DecimalField(
+        source="current_price",
+        max_digits=20,
+        decimal_places=8,
+        coerce_to_string=False,
+        allow_null=True,
+        required=False,
+    )
     pnl = serializers.SerializerMethodField()
-    pnl_percent = serializers.SerializerMethodField()
+    pnlPercent = serializers.SerializerMethodField()
+    openedAt = serializers.DateTimeField(source="opened_at", read_only=True)
+    closedAt = serializers.DateTimeField(source="closed_at", read_only=True)
 
     class Meta:
         model = Position
         fields = [
             "id",
             "symbol",
-            "symbol_name",
             "quantity",
-            "entry_price",
-            "current_price",
+            "entryPrice",
+            "currentPrice",
             "pnl",
-            "pnl_percent",
-            "opened_at",
-            "closed_at",
+            "pnlPercent",
+            "openedAt",
+            "closedAt",
             "is_open",
         ]
-        read_only_fields = ["id", "opened_at", "closed_at"]
+        read_only_fields = ["id", "openedAt", "closedAt"]
 
     def get_pnl(self, obj):
         """Рассчитывает P&L"""
@@ -131,7 +141,7 @@ class PositionSerializer(serializers.ModelSerializer):
             return float((obj.current_price - obj.entry_price) * obj.quantity)
         return None
 
-    def get_pnl_percent(self, obj):
+    def get_pnlPercent(self, obj):
         """Рассчитывает процент P&L"""
         if obj.is_open and obj.current_price and obj.entry_price:
             return float(((obj.current_price - obj.entry_price) / obj.entry_price) * 100)

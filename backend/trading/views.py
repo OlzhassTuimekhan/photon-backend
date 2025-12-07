@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -26,6 +28,87 @@ from trading.services import MarketDataService, get_market_data_service
 from trading.tasks import start_market_monitoring, stop_market_monitoring
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_DEMO_SYMBOL = "BTCUSDT"
+DEFAULT_DEMO_BALANCE = Decimal("10000.00")
+
+
+def _ensure_demo_symbol(user, symbol_code: str = DEFAULT_DEMO_SYMBOL):
+    """
+    Guarantees there is an active symbol for the user and at least one fresh tick.
+    """
+    from django.utils import timezone as tz
+
+    symbol_code = symbol_code.upper()
+    symbol, _ = Symbol.objects.get_or_create(
+        user=user,
+        symbol=symbol_code,
+        defaults={"name": symbol_code, "is_active": True},
+    )
+    if not symbol.is_active:
+        symbol.is_active = True
+        symbol.save(update_fields=["is_active"])
+
+    latest_tick = (
+        MarketData.objects.filter(symbol=symbol).order_by("-timestamp").first()
+    )
+    if not latest_tick or latest_tick.timestamp < tz.now() - timedelta(minutes=5):
+        market_service = get_market_data_service()
+        tick = market_service.get_latest_data(symbol_code)
+        if tick:
+            try:
+                MarketData.objects.create(symbol=symbol, **tick)
+            except Exception as create_error:
+                logger.error(
+                    "Failed to seed market data for %s: %s",
+                    symbol_code,
+                    create_error,
+                    exc_info=True,
+                )
+
+    return symbol
+
+
+def _ensure_demo_account(user):
+    """
+    Guarantees demo account exists with default balance.
+    """
+    account, _ = Account.objects.get_or_create(
+        user=user,
+        defaults={
+            "balance": DEFAULT_DEMO_BALANCE,
+            "free_cash": DEFAULT_DEMO_BALANCE,
+            "initial_balance": DEFAULT_DEMO_BALANCE,
+        },
+    )
+    return account
+
+
+def _refresh_position_price(position: Position):
+    """
+    Updates position current_price from the most recent MarketData entry.
+    """
+    latest_data = (
+        MarketData.objects.filter(symbol=position.symbol).order_by("-timestamp").first()
+    )
+    if latest_data:
+        position.current_price = latest_data.price
+        position.save(update_fields=["current_price"])
+
+
+def _recalculate_account_balances(account: Account, user):
+    """
+    Recalculates used margin and free cash based on open positions.
+    """
+    open_positions = Position.objects.filter(user=user, is_open=True)
+    used_margin = Decimal("0.00")
+    for pos in open_positions:
+        _refresh_position_price(pos)
+        if pos.current_price:
+            used_margin += pos.current_price * pos.quantity
+    account.used_margin = used_margin
+    account.free_cash = max(account.balance - used_margin, Decimal("0.00"))
+    account.save(update_fields=["used_margin", "free_cash"])
 
 
 class SymbolViewSet(viewsets.ModelViewSet):
@@ -498,30 +581,195 @@ class ExecutionAgentView(APIView):
             )
 
 
+class DemoOrderView(APIView):
+    """
+    Простой эндпойнт для ручного размещения демо-сделок (market BUY/SELL).
+    Все операции выполняются только в БД, без отправки на биржу.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        action = str(request.data.get("action", "BUY")).upper()
+        symbol_code = str(request.data.get("symbol", DEFAULT_DEMO_SYMBOL)).upper()
+        quantity_raw = request.data.get("quantity", "0")
+
+        try:
+            quantity = Decimal(str(quantity_raw))
+        except Exception:
+            return Response({"detail": "quantity must be numeric"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if action not in ["BUY", "SELL"]:
+            return Response({"detail": "action must be BUY or SELL"}, status=status.HTTP_400_BAD_REQUEST)
+        if quantity <= 0:
+            return Response({"detail": "quantity must be positive"}, status=status.HTTP_400_BAD_REQUEST)
+
+        symbol = _ensure_demo_symbol(request.user, symbol_code)
+        account = _ensure_demo_account(request.user)
+        market_service = get_market_data_service()
+
+        # Получаем свежую цену и записываем тик
+        tick = market_service.get_latest_data(symbol_code)
+        if not tick:
+            return Response({"detail": "Не удалось получить цену для символа"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        price = Decimal(str(tick.get("price", "0")))
+        if price <= 0:
+            return Response({"detail": "Некорректная цена для символа"}, status=status.HTTP_400_BAD_REQUEST)
+
+        latest_tick, _ = MarketData.objects.get_or_create(symbol=symbol, defaults=tick)
+        if latest_tick.timestamp < tick["timestamp"]:
+            latest_tick.price = tick["price"]
+            latest_tick.volume = tick.get("volume")
+            latest_tick.high = tick.get("high")
+            latest_tick.low = tick.get("low")
+            latest_tick.open_price = tick.get("open_price")
+            latest_tick.change = tick.get("change")
+            latest_tick.change_percent = tick.get("change_percent")
+            latest_tick.timestamp = tick["timestamp"]
+            latest_tick.save()
+
+        with transaction.atomic():
+            trade = None
+            position = None
+
+            if action == "BUY":
+                cost = price * quantity
+                if account.free_cash < cost:
+                    return Response({"detail": "Недостаточно средств на балансе демо-счета"}, status=status.HTTP_400_BAD_REQUEST)
+
+                position, created = Position.objects.get_or_create(
+                    user=request.user,
+                    symbol=symbol,
+                    is_open=True,
+                    defaults={
+                        "quantity": quantity,
+                        "entry_price": price,
+                        "current_price": price,
+                    },
+                )
+                if not created:
+                    total_qty = position.quantity + quantity
+                    new_entry = ((position.entry_price * position.quantity) + (price * quantity)) / total_qty
+                    position.quantity = total_qty
+                    position.entry_price = new_entry
+                    position.current_price = price
+                    position.is_open = True
+                    position.save(update_fields=["quantity", "entry_price", "current_price", "is_open"])
+
+                account.balance = account.balance - cost
+                account.save(update_fields=["balance"])
+
+                trade = Trade.objects.create(
+                    user=request.user,
+                    symbol=symbol,
+                    action="BUY",
+                    price=price,
+                    quantity=quantity,
+                    agent_type="EXECUTION",
+                )
+            else:  # SELL
+                try:
+                    position = Position.objects.get(user=request.user, symbol=symbol, is_open=True)
+                except Position.DoesNotExist:
+                    return Response({"detail": "Нет открытой позиции для продажи"}, status=status.HTTP_400_BAD_REQUEST)
+
+                if position.quantity < quantity:
+                    return Response({"detail": "Недостаточный объем позиции для продажи"}, status=status.HTTP_400_BAD_REQUEST)
+
+                proceeds = price * quantity
+                realized_pnl = (price - position.entry_price) * quantity
+
+                new_qty = position.quantity - quantity
+                if new_qty <= 0:
+                    position.quantity = Decimal("0")
+                    position.is_open = False
+                    position.current_price = price
+                    position.closed_at = timezone.now()
+                    position.save(update_fields=["quantity", "is_open", "current_price", "closed_at"])
+                else:
+                    position.quantity = new_qty
+                    position.current_price = price
+                    position.save(update_fields=["quantity", "current_price"])
+
+                account.balance = account.balance + proceeds
+                account.save(update_fields=["balance"])
+
+                trade = Trade.objects.create(
+                    user=request.user,
+                    symbol=symbol,
+                    action="SELL",
+                    price=price,
+                    quantity=quantity,
+                    agent_type="EXECUTION",
+                    pnl=realized_pnl,
+                )
+
+            # После сделки пересчитываем маржу и свободные средства
+            _recalculate_account_balances(account, request.user)
+
+            # Логируем цепочку агентов в виде сообщений
+            Message.objects.create(
+                user=request.user,
+                from_agent="MARKET_MONITOR",
+                to_agent="DECISION_MAKER",
+                message_type="MARKET_SNAPSHOT",
+                payload={"symbol": symbol.symbol, "price": float(price), "timestamp": tick["timestamp"].isoformat()},
+            )
+            Message.objects.create(
+                user=request.user,
+                from_agent="DECISION_MAKER",
+                to_agent="EXECUTION",
+                message_type="TRADE_DECISION",
+                payload={"action": action, "symbol": symbol.symbol, "quantity": float(quantity)},
+            )
+            Message.objects.create(
+                user=request.user,
+                from_agent="EXECUTION",
+                to_agent="DECISION_MAKER",
+                message_type="EXECUTION_REPORT",
+                payload={
+                    "status": "executed",
+                    "action": action,
+                    "symbol": symbol.symbol,
+                    "price": float(price),
+                    "quantity": float(quantity),
+                },
+            )
+
+            position_data = PositionSerializer(position).data if position else None
+            trade_data = TradeSerializer(trade).data if trade else None
+
+            return Response(
+                {
+                    "status": "executed",
+                    "action": action,
+                    "symbol": symbol.symbol,
+                    "price": float(price),
+                    "quantity": float(quantity),
+                    "account": AccountSerializer(account).data,
+                    "position": position_data,
+                    "trade": trade_data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
 class PortfolioView(APIView):
     """Эндпойнт для получения данных портфеля"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Получить сводку портфеля"""
-        from decimal import Decimal
         from django.db.models import Sum, Count, Q
         from django.utils import timezone as tz
 
-        # Получаем или создаем счет пользователя
-        account, _ = Account.objects.get_or_create(
-            user=request.user,
-            defaults={"balance": Decimal("10000.00"), "free_cash": Decimal("10000.00")}
-        )
+        # Автоподготовка демо-окружения
+        _ensure_demo_symbol(request.user, DEFAULT_DEMO_SYMBOL)
+        account = _ensure_demo_account(request.user)
 
         # Обновляем текущие цены для открытых позиций
         open_positions = Position.objects.filter(user=request.user, is_open=True)
         for position in open_positions:
-            # Получаем последнюю цену из MarketData
-            latest_data = MarketData.objects.filter(symbol=position.symbol).order_by("-timestamp").first()
-            if latest_data:
-                position.current_price = latest_data.price
-                position.save(update_fields=["current_price"])
+            _refresh_position_price(position)
 
         # Рассчитываем использованную маржу (сумма всех открытых позиций)
         used_margin = Decimal("0.00")
@@ -570,6 +818,7 @@ class PositionViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         """Получить только открытые позиции пользователя"""
+        _ensure_demo_symbol(self.request.user, DEFAULT_DEMO_SYMBOL)
         queryset = Position.objects.filter(user=self.request.user, is_open=True)
         
         # Обновляем текущие цены
@@ -588,8 +837,13 @@ class TradeViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = TradeSerializer
 
     def get_queryset(self):
-        """Получить последние 20 сделок пользователя"""
-        return Trade.objects.filter(user=self.request.user).select_related("symbol").order_by("-executed_at")[:20]
+        """Получить историю сделок пользователя с ограничением по limit"""
+        limit_param = self.request.query_params.get("limit")
+        try:
+            limit = int(limit_param) if limit_param else 20
+        except (TypeError, ValueError):
+            limit = 20
+        return Trade.objects.filter(user=self.request.user).select_related("symbol").order_by("-executed_at")[:limit]
 
 
 class EquityCurveView(APIView):
@@ -598,19 +852,23 @@ class EquityCurveView(APIView):
 
     def get(self, request):
         """Получить данные для графика equity curve"""
-        from decimal import Decimal
         from django.db.models import Sum, Min, Max
         from django.utils import timezone as tz
         from datetime import timedelta
 
-        # Получаем счет
-        account, _ = Account.objects.get_or_create(
-            user=request.user,
-            defaults={"balance": Decimal("10000.00"), "initial_balance": Decimal("10000.00")}
-        )
+        _ensure_demo_symbol(request.user, DEFAULT_DEMO_SYMBOL)
+        account = _ensure_demo_account(request.user)
 
         initial_balance = float(account.initial_balance)
         current_balance = float(account.balance)
+
+        # Учитываем текущие открытые позиции (unrealized PnL)
+        open_positions = Position.objects.filter(user=request.user, is_open=True)
+        total_unrealized = Decimal("0.00")
+        for position in open_positions:
+            _refresh_position_price(position)
+            if position.current_price:
+                total_unrealized += (position.current_price - position.entry_price) * position.quantity
 
         # Рассчитываем max drawdown
         # Получаем все сделки с P&L
@@ -652,12 +910,17 @@ class EquityCurveView(APIView):
                 "date": date.strftime("%b %d"),
             })
 
+        # Добавляем unrealized PnL в последний день
+        if equity_data:
+            equity_data[-1]["balance"] = equity_data[-1]["balance"] + float(total_unrealized)
+        portfolio_equity = current_balance + float(total_unrealized)
+
         return Response({
             "initialBalance": initial_balance,
-            "currentBalance": current_balance,
+            "currentBalance": portfolio_equity,
             "maxDrawdown": float(max_drawdown),
             "sharpeRatio": float(sharpe_ratio),
-            "equityData": equity_data,
+            "data": equity_data,
         })
 
 
@@ -693,7 +956,12 @@ class MessagesViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         """Получить все сообщения пользователя, отсортированные по времени"""
-        return Message.objects.filter(user=self.request.user).order_by("-timestamp")
+        limit_param = self.request.query_params.get("limit")
+        try:
+            limit = int(limit_param) if limit_param else 50
+        except (TypeError, ValueError):
+            limit = 50
+        return Message.objects.filter(user=self.request.user).order_by("-timestamp")[:limit]
 
 
 class PerformanceMetricsView(APIView):
@@ -912,9 +1180,9 @@ class SettingsView(APIView):
             defaults={
                 "status": "stopped",
                 "speed": 1.0,
-                "symbol": "AAPL",
+                "symbol": DEFAULT_DEMO_SYMBOL,
                 "timeframe": "1h",
-                "data_provider": "Yahoo Finance",
+                "data_provider": "Bybit",
                 "history_length": "Last 1 year",
                 "model_type": "Random Forest",
                 "prediction_horizon": "1 hour",
@@ -939,9 +1207,9 @@ class SettingsView(APIView):
             defaults={
                 "status": "stopped",
                 "speed": 1.0,
-                "symbol": "AAPL",
+                "symbol": DEFAULT_DEMO_SYMBOL,
                 "timeframe": "1h",
-                "data_provider": "Yahoo Finance",
+                "data_provider": "Bybit",
                 "history_length": "Last 1 year",
                 "model_type": "Random Forest",
                 "prediction_horizon": "1 hour",
@@ -1006,15 +1274,11 @@ class DashboardOverviewView(APIView):
 
     def get(self, request):
         """Получить данные для Dashboard Overview (KPICards)"""
-        from decimal import Decimal
         from django.db.models import Sum, Count, Q
         from django.utils import timezone as tz
 
-        # Получаем счет
-        account, _ = Account.objects.get_or_create(
-            user=request.user,
-            defaults={"balance": Decimal("10000.00"), "initial_balance": Decimal("10000.00")}
-        )
+        _ensure_demo_symbol(request.user, DEFAULT_DEMO_SYMBOL)
+        account = _ensure_demo_account(request.user)
 
         balance = float(account.balance)
 
@@ -1056,17 +1320,11 @@ class MarketChartView(APIView):
 
     def get(self, request):
         """Получить данные для графика по символу"""
-        symbol_param = request.query_params.get("symbol", "AAPL")
+        symbol_param = request.query_params.get("symbol", DEFAULT_DEMO_SYMBOL)
         timeframe = request.query_params.get("timeframe", "1h")  # 15m, 1h, 4h, 1d
 
-        # Получаем символ пользователя
-        try:
-            symbol = Symbol.objects.get(user=request.user, symbol=symbol_param, is_active=True)
-        except Symbol.DoesNotExist:
-            return Response(
-                {"detail": f"Symbol {symbol_param} not found or not active"},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # Гарантируем наличие символа и свежих данных
+        symbol = _ensure_demo_symbol(request.user, symbol_param)
 
         # Определяем период для данных в зависимости от timeframe
         from datetime import timedelta
@@ -1113,6 +1371,9 @@ class MarketHeatmapView(APIView):
 
     def get(self, request):
         """Получить данные для heatmap (все активные символы с изменениями)"""
+        # Гарантируем наличие базового демо-символа
+        _ensure_demo_symbol(request.user, DEFAULT_DEMO_SYMBOL)
+
         # Получаем все активные символы пользователя
         symbols = Symbol.objects.filter(user=request.user, is_active=True)
 
@@ -1126,14 +1387,13 @@ class MarketHeatmapView(APIView):
                 previous = latest_data[1]
                 
                 # Рассчитываем процент изменения
-                change_percent = 0.0
-                if previous.price > 0:
-                    change_percent = ((current.price - previous.price) / previous.price) * 100
-                
+                change = float(current.price - previous.price)
+                change_percent = float(((current.price - previous.price) / previous.price) * 100) if previous.price > 0 else 0.0
                 market_data_list.append({
                     "symbol": symbol.symbol,
                     "price": float(current.price),
                     "previousPrice": float(previous.price),
+                    "change": change,
                     "volume": int(current.volume) if current.volume else 0,
                     "timestamp": current.timestamp,
                     "changePercent": round(change_percent, 2),
@@ -1145,6 +1405,7 @@ class MarketHeatmapView(APIView):
                     "symbol": symbol.symbol,
                     "price": float(current.price),
                     "previousPrice": float(current.price),  # Нет изменения
+                    "change": 0.0,
                     "volume": int(current.volume) if current.volume else 0,
                     "timestamp": current.timestamp,
                     "changePercent": 0.0,
@@ -1155,21 +1416,14 @@ class MarketHeatmapView(APIView):
                     "symbol": symbol.symbol,
                     "price": 0.0,
                     "previousPrice": 0.0,
+                    "change": 0.0,
                     "volume": 0,
                     "timestamp": None,
                     "changePercent": 0.0,
                 })
 
-        # Сортируем по изменению (от большего к меньшему)
-        market_data_list.sort(
-            key=lambda x: x.get("changePercent", 0.0),
-            reverse=True
-        )
+        # Сортируем по изменению (от большего к меньшему) и возвращаем простой список,
+        # чтобы фронт получал сразу готовые данные для heatmap.
+        market_data_list.sort(key=lambda x: x.get("changePercent", 0.0), reverse=True)
 
-        return Response({
-            "symbols": market_data_list,
-            "total": len(market_data_list),
-            "gainers": [s for s in market_data_list if s.get("changePercent", 0) > 0],
-            "losers": [s for s in market_data_list if s.get("changePercent", 0) < 0],
-            "unchanged": [s for s in market_data_list if s.get("changePercent", 0) == 0],
-        })
+        return Response(market_data_list)

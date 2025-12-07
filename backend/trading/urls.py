@@ -22,6 +22,7 @@ from trading.views import (
     DashboardOverviewView,
     MarketChartView,
     MarketHeatmapView,
+    DemoOrderView,
 )
 
 router = DefaultRouter()
@@ -48,4 +49,5 @@ urlpatterns = [
     path("dashboard/overview/", DashboardOverviewView.as_view(), name="dashboard-overview"),
     path("dashboard/market-chart/", MarketChartView.as_view(), name="market-chart"),
     path("dashboard/market-heatmap/", MarketHeatmapView.as_view(), name="market-heatmap"),
+    path("demo/orders/", DemoOrderView.as_view(), name="demo-orders"),
 ]
