@@ -561,19 +561,24 @@ class DecisionMakingAgent:
             max_depth = 10
         
         if self.model_type == "random_forest":
+            # Используем class_weight для балансировки классов (больше BUY/SELL, меньше HOLD)
+            # 'balanced' автоматически взвешивает классы обратно пропорционально их частоте
             self.model = RandomForestClassifier(
                 n_estimators=n_estimators, 
                 random_state=42, 
                 max_depth=max_depth,
                 min_samples_split=2,  # Минимум для малых датасетов
-                min_samples_leaf=1
+                min_samples_leaf=1,
+                class_weight='balanced'  # Балансировка классов для уменьшения HOLD
             )
         elif self.model_type == "gradient_boosting":
+            # GradientBoosting не поддерживает class_weight напрямую, но можем использовать sample_weight
+            # Для простоты используем те же параметры, но с более агрессивным learning_rate
             self.model = GradientBoostingClassifier(
                 n_estimators=n_estimators, 
                 random_state=42, 
                 max_depth=max_depth,
-                learning_rate=0.1 if n_samples >= 100 else 0.2  # Больше learning rate для малых датасетов
+                learning_rate=0.15 if n_samples >= 100 else 0.25  # Больше learning rate для малых датасетов
             )
         else:
             self.model = RandomForestClassifier(
@@ -693,17 +698,26 @@ class DecisionMakingAgent:
                 features.append(sma_cross)
                 
                 # Determine label based on future price movement
+                # Более агрессивная логика для увеличения количества BUY/SELL
                 current_price = current_row.get('close', 0.0)
                 next_price = next_row.get('close', 0.0)
+                
+                # Получаем индикаторы для использования в логике
+                macd_hist = current_row.get('macd_hist', 0.0)
                 
                 if current_price > 0:
                     price_change_pct = ((next_price - current_price) / current_price) * 100
                     
                     # Label: 0=SELL, 1=HOLD, 2=BUY
-                    # Based on future return and current indicators
-                    if price_change_pct > 1.0 and rsi < 60:  # Price goes up, not overbought
+                    # Более низкие пороги для увеличения количества BUY/SELL
+                    # Используем технические индикаторы для более точных сигналов
+                    if price_change_pct > 0.3 and rsi < 70:  # Цена растет, не перекуплен
                         label = 2  # BUY
-                    elif price_change_pct < -1.0 and rsi > 40:  # Price goes down, not oversold
+                    elif price_change_pct < -0.3 and rsi > 30:  # Цена падает, не перепродан
+                        label = 0  # SELL
+                    elif price_change_pct > 0.1 and macd_hist > 0 and sma10 > sma20:  # Слабый рост + бычий тренд
+                        label = 2  # BUY
+                    elif price_change_pct < -0.1 and macd_hist < 0 and sma10 < sma20:  # Слабое падение + медвежий тренд
                         label = 0  # SELL
                     else:
                         label = 1  # HOLD
@@ -1026,11 +1040,25 @@ class DecisionMakingAgent:
         
         # Переобучаем модель
         if self.model_type == "random_forest":
-            self.model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10)
+            self.model = RandomForestClassifier(
+                n_estimators=100, 
+                random_state=42, 
+                max_depth=10,
+                class_weight='balanced'  # Балансировка классов
+            )
         elif self.model_type == "gradient_boosting":
-            self.model = GradientBoostingClassifier(n_estimators=100, random_state=42, max_depth=5)
+            self.model = GradientBoostingClassifier(
+                n_estimators=100, 
+                random_state=42, 
+                max_depth=5,
+                learning_rate=0.15
+            )
         else:
-            self.model = RandomForestClassifier(n_estimators=100, random_state=42)
+            self.model = RandomForestClassifier(
+                n_estimators=100, 
+                random_state=42,
+                class_weight='balanced'
+            )
         
         self.model.fit(X_train_scaled, y_train)
         
