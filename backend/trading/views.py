@@ -846,6 +846,45 @@ class TradeViewSet(viewsets.ReadOnlyModelViewSet):
         return Trade.objects.filter(user=self.request.user).select_related("symbol").order_by("-executed_at")[:limit]
 
 
+class PortfolioView(APIView):
+    """Эндпойнт агрегированных данных портфеля (баланс, позиции, сделки)"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db.models import Sum
+        from django.utils import timezone as tz
+
+        # Гарантируем демо-аккаунт и символ, пересчитываем баланс
+        _ensure_demo_symbol(request.user, DEFAULT_DEMO_SYMBOL)
+        account = _ensure_demo_account(request.user)
+        _recalculate_account_balances(account, request.user)
+
+        # Открытые позиции и последние сделки
+        positions_qs = Position.objects.filter(user=request.user, is_open=True).select_related("symbol")
+        trades_qs = Trade.objects.filter(user=request.user).select_related("symbol").order_by("-executed_at")[:50]
+
+        # PnL
+        today_start = tz.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_pnl = (
+            trades_qs.filter(executed_at__gte=today_start, pnl__isnull=False).aggregate(total=Sum("pnl"))["total"]
+            or Decimal("0.00")
+        )
+        total_pnl = trades_qs.filter(pnl__isnull=False).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+
+        data = {
+            "balance": float(account.balance),
+            "freeCash": float(account.free_cash),
+            "usedMargin": float(account.used_margin),
+            "initialBalance": float(account.initial_balance),
+            "totalTrades": Trade.objects.filter(user=request.user).count(),
+            "todayPnL": float(today_pnl),
+            "totalPnL": float(total_pnl),
+            "positions": PositionSerializer(positions_qs, many=True).data,
+            "trades": TradeSerializer(trades_qs, many=True).data,
+        }
+        return Response(data)
+
+
 class EquityCurveView(APIView):
     """Эндпойнт для данных equity curve"""
     permission_classes = [IsAuthenticated]
@@ -1065,30 +1104,32 @@ class PnLCurveView(APIView):
         initial_balance = float(account.initial_balance)
         current_balance = float(account.balance)
 
-        # Генерируем данные для графика (последние 30 дней)
+        # Генерируем данные PnL (последние 30 дней)
         pnl_data = []
         days = 30
         today = tz.now().date()
 
         for i in range(days + 1):
             date = today - timedelta(days=days - i)
-            # Рассчитываем баланс на эту дату
             trades_until_date = Trade.objects.filter(
                 user=request.user,
-                executed_at__date__lte=date
+                executed_at__date__lte=date,
+                pnl__isnull=False,
             ).aggregate(total_pnl=Sum("pnl"))["total_pnl"] or Decimal("0.00")
 
-            balance_on_date = initial_balance + float(trades_until_date)
+            pnl_value = float(trades_until_date)
             pnl_data.append({
-                "day": i,
-                "balance": balance_on_date,
                 "date": date.strftime("%b %d"),
+                "pnl": pnl_value,
             })
+
+        total_return = current_balance - initial_balance
 
         return Response({
             "initialBalance": initial_balance,
             "currentBalance": current_balance,
-            "pnlData": pnl_data,
+            "totalPnL": total_return,
+            "data": pnl_data,
         })
 
 
