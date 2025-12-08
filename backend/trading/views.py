@@ -863,13 +863,14 @@ class PortfolioView(APIView):
         positions_qs = Position.objects.filter(user=request.user, is_open=True).select_related("symbol")
         trades_qs = Trade.objects.filter(user=request.user).select_related("symbol").order_by("-executed_at")[:50]
 
-        # PnL
+        # PnL calculations (use separate queryset without slicing)
+        trades_for_pnl = Trade.objects.filter(user=request.user)
         today_start = tz.now().replace(hour=0, minute=0, second=0, microsecond=0)
         today_pnl = (
-            trades_qs.filter(executed_at__gte=today_start, pnl__isnull=False).aggregate(total=Sum("pnl"))["total"]
+            trades_for_pnl.filter(executed_at__gte=today_start, pnl__isnull=False).aggregate(total=Sum("pnl"))["total"]
             or Decimal("0.00")
         )
-        total_pnl = trades_qs.filter(pnl__isnull=False).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+        total_pnl = trades_for_pnl.filter(pnl__isnull=False).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
 
         data = {
             "balance": float(account.balance),
