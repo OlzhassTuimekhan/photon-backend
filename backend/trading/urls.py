@@ -23,6 +23,7 @@ from trading.views import (
     MarketChartView,
     MarketHeatmapView,
     DemoOrderView,
+    ClosePositionView,
 )
 
 router = DefaultRouter()
@@ -41,6 +42,7 @@ urlpatterns = [
     path("agents/execution/", ExecutionAgentView.as_view(), name="execution"),
     path("portfolio/", PortfolioView.as_view(), name="portfolio"),
     path("portfolio/equity-curve/", EquityCurveView.as_view(), name="equity-curve"),
+    path("positions/close/", ClosePositionView.as_view(), name="close-position"),
     path("agents/detail/", AgentsDetailView.as_view(), name="agents-detail"),
     path("analytics/performance-metrics/", PerformanceMetricsView.as_view(), name="performance-metrics"),
     path("analytics/pnl-curve/", PnLCurveView.as_view(), name="pnl-curve"),

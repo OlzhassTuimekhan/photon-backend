@@ -98,17 +98,43 @@ def _refresh_position_price(position: Position):
 
 def _recalculate_account_balances(account: Account, user):
     """
-    Recalculates used margin and free cash based on open positions.
+    Recalculates balance, used margin and free cash based on open positions.
+    Balance = initial_balance + total_pnl (from closed trades) + unrealized_pnl (from open positions)
     """
     open_positions = Position.objects.filter(user=user, is_open=True)
     used_margin = Decimal("0.00")
+    unrealized_pnl = Decimal("0.00")
+    
     for pos in open_positions:
         _refresh_position_price(pos)
         if pos.current_price:
-            used_margin += pos.current_price * pos.quantity
+            # Стоимость позиции по entry price
+            position_cost = pos.entry_price * pos.quantity
+            # Текущая стоимость позиции
+            position_value = pos.current_price * pos.quantity
+            # Used margin = стоимость по entry price
+            used_margin += position_cost
+            # Unrealized PnL = текущая стоимость - стоимость входа
+            unrealized_pnl += (pos.current_price - pos.entry_price) * pos.quantity
+    
+    # Получаем total PnL из закрытых сделок
+    from django.db.models import Sum
+    closed_pnl = Trade.objects.filter(
+        user=user,
+        action="SELL",
+        pnl__isnull=False
+    ).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+    
+    # Balance = начальный баланс + закрытый PnL + нереализованный PnL
+    account.balance = account.initial_balance + closed_pnl + unrealized_pnl
     account.used_margin = used_margin
-    account.free_cash = max(account.balance - used_margin, Decimal("0.00"))
-    account.save(update_fields=["used_margin", "free_cash"])
+    account.free_cash = account.initial_balance - used_margin + closed_pnl
+    
+    # Проверяем что free_cash не отрицательный
+    if account.free_cash < 0:
+        account.free_cash = Decimal("0.00")
+    
+    account.save(update_fields=["balance", "used_margin", "free_cash"])
 
 
 class SymbolViewSet(viewsets.ModelViewSet):
@@ -260,19 +286,56 @@ class TradingDecisionViewSet(viewsets.ModelViewSet):
     serializer_class = TradingDecisionSerializer
 
     def get_queryset(self):
-        queryset = TradingDecision.objects.filter(user=self.request.user)
+        from datetime import datetime
+        queryset = TradingDecision.objects.filter(user=self.request.user).select_related("symbol", "market_data")
 
         # Фильтр по символу
         symbol_id = self.request.query_params.get("symbol_id")
         if symbol_id:
             queryset = queryset.filter(symbol_id=symbol_id)
 
-        # Фильтр по решению
+        # Фильтр по решению (action)
+        action = self.request.query_params.get("action")
+        if action:
+            queryset = queryset.filter(decision=action.upper())
+        
+        # Старый параметр decision для обратной совместимости
         decision = self.request.query_params.get("decision")
         if decision:
             queryset = queryset.filter(decision=decision.upper())
-
-        return queryset.order_by("-created_at")
+        
+        # Фильтр по дате (from_date, to_date)
+        from_date = self.request.query_params.get("from_date")
+        if from_date:
+            try:
+                from_datetime = datetime.fromisoformat(from_date.replace('Z', '+00:00'))
+                queryset = queryset.filter(created_at__gte=from_datetime)
+            except (ValueError, TypeError):
+                pass  # Игнорируем неправильный формат
+        
+        to_date = self.request.query_params.get("to_date")
+        if to_date:
+            try:
+                to_datetime = datetime.fromisoformat(to_date.replace('Z', '+00:00'))
+                queryset = queryset.filter(created_at__lte=to_datetime)
+            except (ValueError, TypeError):
+                pass  # Игнорируем неправильный формат
+        
+        # Лимит для первоначальной загрузки (по умолчанию 50)
+        limit = self.request.query_params.get("limit")
+        offset = self.request.query_params.get("offset", 0)
+        
+        queryset = queryset.order_by("-created_at")
+        
+        if limit:
+            try:
+                limit = int(limit)
+                offset = int(offset)
+                return queryset[offset:offset + limit]
+            except (TypeError, ValueError):
+                pass
+        
+        return queryset
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
@@ -616,17 +679,20 @@ class DemoOrderView(APIView):
         if price <= 0:
             return Response({"detail": "Некорректная цена для символа"}, status=status.HTTP_400_BAD_REQUEST)
 
-        latest_tick, _ = MarketData.objects.get_or_create(symbol=symbol, defaults=tick)
-        if latest_tick.timestamp < tick["timestamp"]:
-            latest_tick.price = tick["price"]
-            latest_tick.volume = tick.get("volume")
-            latest_tick.high = tick.get("high")
-            latest_tick.low = tick.get("low")
-            latest_tick.open_price = tick.get("open_price")
-            latest_tick.change = tick.get("change")
-            latest_tick.change_percent = tick.get("change_percent")
-            latest_tick.timestamp = tick["timestamp"]
-            latest_tick.save()
+        # Проверяем последнюю запись и создаем новую если цена изменилась
+        latest_tick = MarketData.objects.filter(symbol=symbol).order_by("-timestamp").first()
+        if not latest_tick or latest_tick.timestamp < tick["timestamp"]:
+            MarketData.objects.create(
+                symbol=symbol,
+                price=tick["price"],
+                volume=tick.get("volume"),
+                high=tick.get("high"),
+                low=tick.get("low"),
+                open_price=tick.get("open_price"),
+                change=tick.get("change"),
+                change_percent=tick.get("change_percent"),
+                timestamp=tick["timestamp"]
+            )
 
         with transaction.atomic():
             trade = None
@@ -634,8 +700,20 @@ class DemoOrderView(APIView):
 
             if action == "BUY":
                 cost = price * quantity
-                if account.free_cash < cost:
-                    return Response({"detail": "Недостаточно средств на балансе демо-счета"}, status=status.HTTP_400_BAD_REQUEST)
+                # Проверяем доступность средств перед покупкой
+                available_cash = account.initial_balance - account.used_margin
+                from django.db.models import Sum
+                closed_pnl = Trade.objects.filter(
+                    user=request.user,
+                    action="SELL",
+                    pnl__isnull=False
+                ).aggregate(total=Sum("pnl"))["total"] or Decimal("0.00")
+                available_cash += closed_pnl
+                
+                if available_cash < cost:
+                    return Response({
+                        "detail": f"Недостаточно средств. Доступно: ${available_cash:.2f}, Требуется: ${cost:.2f}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
                 position, created = Position.objects.get_or_create(
                     user=request.user,
@@ -656,9 +734,7 @@ class DemoOrderView(APIView):
                     position.is_open = True
                     position.save(update_fields=["quantity", "entry_price", "current_price", "is_open"])
 
-                account.balance = account.balance - cost
-                account.save(update_fields=["balance"])
-
+                # НЕ изменяем balance вручную - он пересчитается автоматически
                 trade = Trade.objects.create(
                     user=request.user,
                     symbol=symbol,
@@ -676,7 +752,6 @@ class DemoOrderView(APIView):
                 if position.quantity < quantity:
                     return Response({"detail": "Недостаточный объем позиции для продажи"}, status=status.HTTP_400_BAD_REQUEST)
 
-                proceeds = price * quantity
                 realized_pnl = (price - position.entry_price) * quantity
 
                 new_qty = position.quantity - quantity
@@ -691,9 +766,7 @@ class DemoOrderView(APIView):
                     position.current_price = price
                     position.save(update_fields=["quantity", "current_price"])
 
-                account.balance = account.balance + proceeds
-                account.save(update_fields=["balance"])
-
+                # НЕ изменяем balance вручную - он пересчитается автоматически
                 trade = Trade.objects.create(
                     user=request.user,
                     symbol=symbol,
@@ -752,6 +825,120 @@ class DemoOrderView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+
+class ClosePositionView(APIView):
+    """Закрытие открытой позиции (продать всю позицию)"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """
+        Закрыть позицию целиком
+        Принимает: position_id
+        """
+        position_id = request.data.get("position_id")
+        if not position_id:
+            return Response({"detail": "position_id required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            position = Position.objects.get(id=position_id, user=request.user, is_open=True)
+        except Position.DoesNotExist:
+            return Response({"detail": "Position not found or already closed"}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Используем DemoOrderView для продажи
+        symbol_code = position.symbol.symbol
+        quantity = position.quantity
+        
+        # Получаем текущую цену
+        market_service = get_market_data_service()
+        tick = market_service.get_latest_data(symbol_code)
+        if not tick:
+            return Response({"detail": "Could not get current price"}, status=status.HTTP_502_BAD_GATEWAY)
+        
+        price = Decimal(str(tick.get("price", "0")))
+        if price <= 0:
+            return Response({"detail": "Invalid price"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Создаем MarketData если нужно
+        latest_tick = MarketData.objects.filter(symbol=position.symbol).order_by("-timestamp").first()
+        if not latest_tick or latest_tick.timestamp < tick["timestamp"]:
+            MarketData.objects.create(
+                symbol=position.symbol,
+                price=tick["price"],
+                volume=tick.get("volume"),
+                high=tick.get("high"),
+                low=tick.get("low"),
+                open_price=tick.get("open_price"),
+                change=tick.get("change"),
+                change_percent=tick.get("change_percent"),
+                timestamp=tick["timestamp"]
+            )
+        
+        with transaction.atomic():
+            # Рассчитываем PnL
+            realized_pnl = (price - position.entry_price) * quantity
+            
+            # Закрываем позицию
+            position.quantity = Decimal("0")
+            position.is_open = False
+            position.current_price = price
+            position.closed_at = timezone.now()
+            position.save(update_fields=["quantity", "is_open", "current_price", "closed_at"])
+            
+            # Создаем сделку SELL
+            trade = Trade.objects.create(
+                user=request.user,
+                symbol=position.symbol,
+                action="SELL",
+                price=price,
+                quantity=quantity,
+                agent_type="EXECUTION",
+                pnl=realized_pnl,
+            )
+            
+            # Получаем или создаем account
+            account = _ensure_demo_account(request.user)
+            
+            # Пересчитываем баланс
+            _recalculate_account_balances(account, request.user)
+            
+            # Логируем сообщения
+            Message.objects.create(
+                user=request.user,
+                from_agent="MARKET_MONITOR",
+                to_agent="DECISION_MAKER",
+                message_type="MARKET_SNAPSHOT",
+                payload={"symbol": symbol_code, "price": float(price), "timestamp": tick["timestamp"].isoformat()},
+            )
+            Message.objects.create(
+                user=request.user,
+                from_agent="DECISION_MAKER",
+                to_agent="EXECUTION",
+                message_type="TRADE_DECISION",
+                payload={"action": "SELL", "symbol": symbol_code, "quantity": float(quantity)},
+            )
+            Message.objects.create(
+                user=request.user,
+                from_agent="EXECUTION",
+                to_agent="DECISION_MAKER",
+                message_type="EXECUTION_REPORT",
+                payload={
+                    "status": "executed",
+                    "action": "SELL",
+                    "symbol": symbol_code,
+                    "price": float(price),
+                    "quantity": float(quantity),
+                    "pnl": float(realized_pnl),
+                },
+            )
+            
+            return Response({
+                "status": "success",
+                "message": "Position closed successfully",
+                "trade": TradeSerializer(trade).data,
+                "pnl": float(realized_pnl),
+                "account": AccountSerializer(account).data,
+            }, status=status.HTTP_200_OK)
+
 
 class PortfolioView(APIView):
     """Эндпойнт для получения данных портфеля"""

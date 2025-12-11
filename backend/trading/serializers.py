@@ -55,6 +55,8 @@ class TradingDecisionSerializer(serializers.ModelSerializer):
     symbol_id = serializers.IntegerField(source="symbol.id", read_only=True)
     # Явно указываем DecimalField для правильной сериализации
     confidence = serializers.DecimalField(max_digits=5, decimal_places=2, coerce_to_string=False, allow_null=True, required=False)
+    status = serializers.SerializerMethodField()
+    executed_at = serializers.SerializerMethodField()
 
     class Meta:
         model = TradingDecision
@@ -69,8 +71,49 @@ class TradingDecisionSerializer(serializers.ModelSerializer):
             "reasoning",
             "metadata",
             "created_at",
+            "status",
+            "executed_at",
         ]
-        read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "created_at", "status", "executed_at"]
+    
+    def get_status(self, obj):
+        """
+        Определяет статус решения:
+        - executed: если есть соответствующая сделка (Trade)
+        - pending: если решение HOLD
+        - pending: если решение BUY/SELL но нет сделки
+        """
+        if obj.decision == "HOLD":
+            return "completed"  # HOLD решения всегда завершены
+        
+        # Ищем соответствующую сделку
+        from trading.models import Trade
+        trade = Trade.objects.filter(
+            user=obj.user,
+            symbol=obj.symbol,
+            action=obj.decision,
+            executed_at__gte=obj.created_at,
+            executed_at__lte=obj.created_at + timezone.timedelta(minutes=5)  # В пределах 5 минут
+        ).first()
+        
+        return "executed" if trade else "pending"
+    
+    def get_executed_at(self, obj):
+        """Возвращает время исполнения если есть соответствующая сделка"""
+        if obj.decision == "HOLD":
+            return obj.created_at  # HOLD "исполняется" сразу
+        
+        # Ищем соответствующую сделку
+        from trading.models import Trade
+        trade = Trade.objects.filter(
+            user=obj.user,
+            symbol=obj.symbol,
+            action=obj.decision,
+            executed_at__gte=obj.created_at,
+            executed_at__lte=obj.created_at + timezone.timedelta(minutes=5)
+        ).first()
+        
+        return trade.executed_at if trade else None
 
 
 class AgentStatusSerializer(serializers.ModelSerializer):
