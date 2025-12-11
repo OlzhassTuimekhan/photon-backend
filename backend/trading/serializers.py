@@ -190,6 +190,9 @@ class AgentDetailSerializer(serializers.ModelSerializer):
     lastUpdated = serializers.DateTimeField(source="last_activity", read_only=True)
     messagesProcessed = serializers.SerializerMethodField()
     logs = serializers.SerializerMethodField()
+    recentDecisions = serializers.SerializerMethodField()
+    currentState = serializers.SerializerMethodField()
+    explorationMode = serializers.SerializerMethodField()
 
     class Meta:
         model = AgentStatus
@@ -202,6 +205,9 @@ class AgentDetailSerializer(serializers.ModelSerializer):
             "lastUpdated",
             "messagesProcessed",
             "logs",
+            "recentDecisions",
+            "currentState",
+            "explorationMode",
         ]
 
     def get_type(self, obj):
@@ -228,13 +234,43 @@ class AgentDetailSerializer(serializers.ModelSerializer):
         return mapping.get(obj.status, "idle")
 
     def get_lastAction(self, obj):
-        """Получает последнее действие из metadata или логов"""
+        """Получает последнее действие в зависимости от типа агента"""
+        # Для DECISION_MAKER - показываем последнее решение
+        if obj.agent_type == "DECISION_MAKER":
+            last_decision = TradingDecision.objects.filter(
+                user=obj.user
+            ).order_by("-created_at").first()
+            if last_decision:
+                action = last_decision.decision
+                confidence = float(last_decision.confidence) if last_decision.confidence else 0.0
+                return f"{action} (confidence: {confidence:.1f}%)"
+        
+        # Для EXECUTION - показываем последнюю сделку
+        elif obj.agent_type == "EXECUTION":
+            last_trade = Trade.objects.filter(
+                user=obj.user
+            ).order_by("-executed_at").first()
+            if last_trade:
+                action = last_trade.action
+                symbol = last_trade.symbol.symbol
+                qty = float(last_trade.quantity)
+                return f"{action} {qty} {symbol}"
+        
+        # Для MARKET_MONITOR - показываем последнее обновление
+        elif obj.agent_type == "MARKET_MONITOR":
+            from trading.models import UserSettings
+            settings = UserSettings.objects.filter(user=obj.user).first()
+            if settings:
+                return f"Monitoring {settings.symbol}"
+        
+        # Fallback: ищем в metadata или логах
         if obj.metadata and "last_action" in obj.metadata:
             return obj.metadata["last_action"]
-        # Пробуем получить из последнего лога
         last_log = obj.logs.order_by("-timestamp").first()
         if last_log:
-            return last_log.message
+            # Обрезаем длинные сообщения
+            msg = last_log.message
+            return msg[:80] + "..." if len(msg) > 80 else msg
         return "No actions yet"
 
     def get_messagesProcessed(self, obj):
@@ -250,6 +286,88 @@ class AgentDetailSerializer(serializers.ModelSerializer):
         """Получает последние логи агента"""
         logs = obj.logs.order_by("-timestamp")[:10]  # Последние 10 логов
         return AgentLogSerializer(logs, many=True).data
+    
+    def get_recentDecisions(self, obj):
+        """Получает последние решения для Decision Maker"""
+        if obj.agent_type != "DECISION_MAKER":
+            return []
+        
+        decisions = TradingDecision.objects.filter(
+            user=obj.user
+        ).order_by("-created_at")[:5]
+        
+        result = []
+        for decision in decisions:
+            result.append({
+                "id": decision.id,
+                "action": decision.decision,
+                "confidence": float(decision.confidence) if decision.confidence else 0.0,
+                "reasoning": decision.reasoning,
+                "symbol": decision.symbol.symbol,
+                "timestamp": decision.created_at,
+                "metadata": decision.metadata or {},
+            })
+        return result
+    
+    def get_currentState(self, obj):
+        """Получает текущее состояние агента"""
+        from trading.models import UserSettings, Trade
+        
+        state = {
+            "isActive": obj.status == "RUNNING",
+            "error": obj.error_message if obj.error_message else None,
+        }
+        
+        # Для DECISION_MAKER добавляем информацию о модели
+        if obj.agent_type == "DECISION_MAKER":
+            settings = UserSettings.objects.filter(user=obj.user).first()
+            if settings:
+                state["modelType"] = settings.model_type
+                state["confidenceThreshold"] = float(settings.confidence_threshold)
+                state["riskLevel"] = settings.risk_level
+            
+            # Проверяем exploration mode
+            completed_trades = Trade.objects.filter(
+                user=obj.user,
+                action="SELL",
+                pnl__isnull=False
+            ).count()
+            state["completedTrades"] = completed_trades
+            state["needsMoreData"] = completed_trades < 10
+        
+        # Для EXECUTION добавляем статистику
+        elif obj.agent_type == "EXECUTION":
+            trades_count = Trade.objects.filter(user=obj.user).count()
+            state["totalTrades"] = trades_count
+        
+        # Для MARKET_MONITOR добавляем информацию о символе
+        elif obj.agent_type == "MARKET_MONITOR":
+            settings = UserSettings.objects.filter(user=obj.user).first()
+            if settings:
+                state["symbol"] = settings.symbol
+                state["timeframe"] = settings.timeframe
+        
+        return state
+    
+    def get_explorationMode(self, obj):
+        """Проверяет включен ли exploration mode"""
+        if obj.agent_type != "DECISION_MAKER":
+            return None
+        
+        # Exploration mode активен если < 10 завершенных сделок
+        completed_trades = Trade.objects.filter(
+            user=obj.user,
+            action="SELL",
+            pnl__isnull=False
+        ).count()
+        
+        is_exploration = completed_trades < 10
+        
+        return {
+            "enabled": is_exploration,
+            "reason": f"Collecting data for training ({completed_trades}/10 completed trades)" if is_exploration else None,
+            "confidenceThreshold": 0.35 if is_exploration else None,
+        }
 
 
 class MessageSerializer(serializers.ModelSerializer):
