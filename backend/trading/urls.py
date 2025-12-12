@@ -25,6 +25,11 @@ from trading.views import (
     DemoOrderView,
     ClosePositionView,
 )
+from trading.views_meta import (
+    MetaModelAgentView,
+    TradingChartDataView,
+    ApprovedAssetsView,
+)
 
 router = DefaultRouter()
 router.register(r"symbols", SymbolViewSet, basename="symbol")
@@ -52,4 +57,8 @@ urlpatterns = [
     path("dashboard/market-chart/", MarketChartView.as_view(), name="market-chart"),
     path("dashboard/market-heatmap/", MarketHeatmapView.as_view(), name="market-heatmap"),
     path("demo/orders/", DemoOrderView.as_view(), name="demo-orders"),
+    # Новые эндпоинты для мета-модели
+    path("meta-model/trade/", MetaModelAgentView.as_view(), name="meta-model-trade"),
+    path("meta-model/chart-data/", TradingChartDataView.as_view(), name="trading-chart-data"),
+    path("meta-model/approved-assets/", ApprovedAssetsView.as_view(), name="approved-assets"),
 ]

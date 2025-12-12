@@ -515,33 +515,42 @@ class DecisionMakingAgent:
         }
     
     def _train_initial_model(self):
-        """Train initial AI model using historical or synthetic data."""
+        """Train initial AI model using historical data only."""
         if not self.enable_ai:
             return
         
-        logger.info("Training initial AI model...")
+        logger.info("Training initial AI model on historical data...")
         
-        # Try to use historical data if enabled
-        if self.use_historical_training:
-            try:
-                logger.info("Attempting to train on real historical data...")
-                X, y = self._prepare_historical_training_data()
-                # Уменьшено минимальное требование для малого количества данных (например, Bybit 200 свечек)
-                min_samples = 30  # Минимум 30 samples вместо 100
-                if X is not None and len(X) >= min_samples:
-                    logger.info(f"Using {len(X)} historical samples for training")
-                    # Если данных мало, используем меньше деревьев и меньшую глубину
-                    if len(X) < 100:
-                        logger.info(f"Small dataset ({len(X)} samples), using reduced model complexity")
-                else:
-                    logger.warning(f"Not enough historical data ({len(X) if X is not None else 0} samples, need {min_samples}), falling back to synthetic data")
-                    X, y = self._prepare_synthetic_training_data()
-            except Exception as e:
-                logger.warning(f"Error preparing historical data: {e}. Using synthetic data.")
-                X, y = self._prepare_synthetic_training_data()
-        else:
-            logger.info("Using synthetic training data")
-            X, y = self._prepare_synthetic_training_data()
+        # Use only historical data - no synthetic data
+        if not self.use_historical_training:
+            logger.warning("Historical training disabled. Model will use rule-based logic until historical data is available.")
+            self.is_trained = False
+            return
+        
+        try:
+            logger.info("Attempting to train on real historical data...")
+            X, y = self._prepare_historical_training_data()
+            # Уменьшено минимальное требование для малого количества данных (например, Bybit 200 свечек)
+            min_samples = 20  # Минимум 20 samples для обучения
+            if X is not None and len(X) >= min_samples:
+                logger.info(f"Using {len(X)} historical samples for training")
+                # Если данных мало, используем меньше деревьев и меньшую глубину
+                if len(X) < 100:
+                    logger.info(f"Small dataset ({len(X)} samples), using reduced model complexity")
+            else:
+                logger.warning(f"Not enough historical data ({len(X) if X is not None else 0} samples, need {min_samples}). Model will use rule-based logic.")
+                self.is_trained = False
+                return
+        except Exception as e:
+            logger.error(f"Error preparing historical data: {e}. Model will use rule-based logic.")
+            self.is_trained = False
+            return
+        
+        # Проверяем что данные есть
+        if X is None or len(X) == 0:
+            logger.error("No training data available. Model will use rule-based logic.")
+            self.is_trained = False
+            return
         
         # Для малого количества данных используем меньший test_size
         test_size = 0.2 if len(X) > 50 else 0.1  # Меньший test_size для малых датасетов
@@ -631,20 +640,83 @@ class DecisionMakingAgent:
             
             logger.info(f"Fetching historical data for {ticker} (period: {self.training_period})")
             
-            # Get historical data
-            # Используем те же настройки, что и в основном агенте (для Bybit fallback)
-            market_agent = MarketMonitoringAgent(
-                ticker=ticker,
-                interval="1d",  # Daily data for training
-                period=self.training_period,
-                enable_cache=True,
-                request_delay=5.0,  # Задержка для обхода блокировок
-                max_retries=5,  # Больше попыток
-                backoff_factor=3.0  # Больше времени между попытками
-            )
+            # Пробуем использовать Binance REST API для криптовалют (больше данных)
+            use_binance = False
+            try:
+                # Проверяем, является ли символ криптовалютой
+                from trading.agents.market_monitor import is_cryptocurrency
+                if is_cryptocurrency(ticker):
+                    from trading.services.binance_api import BinanceAPIService
+                    binance_service = BinanceAPIService()
+                    
+                    # Маппинг period в days
+                    period_days = {
+                        "1mo": 30,
+                        "3mo": 90,
+                        "6mo": 180,
+                        "1y": 365,
+                    }
+                    days = period_days.get(self.training_period, 30)
+                    
+                    logger.info(f"Using Binance REST API for {ticker} (up to 1000 candles)")
+                    historical_data = binance_service.get_historical_data(
+                        symbol=ticker,
+                        interval="1d",  # Daily data for training
+                        days=days
+                    )
+                    
+                    if historical_data and len(historical_data) >= 20:
+                        use_binance = True
+                        logger.info(f"Retrieved {len(historical_data)} candles from Binance")
+                        
+                        # Конвертируем в DataFrame
+                        import pandas as pd
+                        df_data = []
+                        for candle in historical_data:
+                            df_data.append({
+                                "Open": float(candle["open"]),
+                                "High": float(candle["high"]),
+                                "Low": float(candle["low"]),
+                                "Close": float(candle["close"]),
+                                "Volume": float(candle["volume"]),
+                            })
+                        
+                        df = pd.DataFrame(df_data)
+                        df.index = [candle["timestamp"] for candle in historical_data]
+                        
+                        # Используем MarketMonitoringAgent для вычисления индикаторов
+                        market_agent = MarketMonitoringAgent(
+                            ticker=ticker,
+                            interval="1d",
+                            period=self.training_period,
+                            enable_cache=False
+                        )
+                        market_agent.raw_data = df
+                        data_with_indicators = market_agent.compute_indicators(df)
+                        data = market_agent.preprocess(data_with_indicators)
+                        
+                        logger.info(f"Processed {len(data)} records with indicators from Binance")
+                    else:
+                        logger.warning(f"Not enough Binance data ({len(historical_data) if historical_data else 0}), falling back to MarketMonitoringAgent")
+                        use_binance = False
+            except Exception as binance_error:
+                logger.debug(f"Binance API not available: {binance_error}, using MarketMonitoringAgent")
+                use_binance = False
             
-            # Get processed data with indicators
-            data = market_agent.get_processed_data(analyze=False)
+            if not use_binance:
+                # Get historical data через MarketMonitoringAgent (Bybit/yfinance)
+                market_agent = MarketMonitoringAgent(
+                    ticker=ticker,
+                    interval="1d",  # Daily data for training
+                    period=self.training_period,
+                    enable_cache=True,
+                    request_delay=5.0,  # Задержка для обхода блокировок
+                    max_retries=5,  # Больше попыток
+                    backoff_factor=3.0  # Больше времени между попытками
+                )
+                
+                # Get processed data with indicators
+                data = market_agent.get_processed_data(analyze=False)
             
             # Уменьшено минимальное требование для малого количества данных
             if data.empty or len(data) < 20:
@@ -713,31 +785,42 @@ class DecisionMakingAgent:
                 features.append(sma_cross)
                 
                 # Determine label based on future price movement
-                # Более агрессивная логика для увеличения количества BUY/SELL
+                # Правильная логика: смотрим на цену через несколько периодов вперед
+                # и учитываем транзакционные издержки
+                lookahead_periods = 3  # Смотрим на 3 свечи вперед (для daily = 3 дня)
+                transaction_cost_pct = 0.1  # Комиссия 0.1% (типично для криптобирж)
+                min_profit_threshold = 0.5  # Минимальная прибыль 0.5% (с учетом комиссии)
+                
                 current_price = current_row.get('close', 0.0)
-                next_price = next_row.get('close', 0.0)
                 
-                # Получаем индикаторы для использования в логике
-                macd_hist = current_row.get('macd_hist', 0.0)
-                
-                if current_price > 0:
-                    price_change_pct = ((next_price - current_price) / current_price) * 100
+                if current_price > 0 and i + lookahead_periods < len(data):
+                    # Берем цену через N периодов вперед
+                    future_row = data.iloc[i + lookahead_periods]
+                    future_price = future_row.get('close', 0.0)
                     
-                    # Label: 0=SELL, 1=HOLD, 2=BUY
-                    # Более низкие пороги для увеличения количества BUY/SELL
-                    # Используем технические индикаторы для более точных сигналов
-                    if price_change_pct > 0.3 and rsi < 70:  # Цена растет, не перекуплен
-                        label = 2  # BUY
-                    elif price_change_pct < -0.3 and rsi > 30:  # Цена падает, не перепродан
-                        label = 0  # SELL
-                    elif price_change_pct > 0.1 and macd_hist > 0 and sma10 > sma20:  # Слабый рост + бычий тренд
-                        label = 2  # BUY
-                    elif price_change_pct < -0.1 and macd_hist < 0 and sma10 < sma20:  # Слабое падение + медвежий тренд
-                        label = 0  # SELL
+                    if future_price > 0:
+                        # Вычисляем изменение цены в процентах
+                        price_change_pct = ((future_price - current_price) / current_price) * 100
+                        
+                        # Учитываем транзакционные издержки
+                        # Для BUY: нужно покрыть комиссию на вход и выход (0.1% + 0.1% = 0.2%)
+                        # Для SELL: аналогично
+                        net_profit_pct = abs(price_change_pct) - (transaction_cost_pct * 2)
+                        
+                        # Label: 0=SELL, 1=HOLD, 2=BUY
+                        # Простая логика: если цена выросла достаточно (с учетом комиссии) -> BUY
+                        # Если упала достаточно -> SELL, иначе HOLD
+                        # НЕ используем индикаторы в логике меток - они только в фичах!
+                        if price_change_pct > min_profit_threshold and net_profit_pct > 0:
+                            label = 2  # BUY - цена выросла достаточно для прибыли
+                        elif price_change_pct < -min_profit_threshold and net_profit_pct > 0:
+                            label = 0  # SELL - цена упала достаточно (шорт или продажа)
+                        else:
+                            label = 1  # HOLD - недостаточное движение или не покрывает комиссию
                     else:
-                        label = 1  # HOLD
+                        label = 1  # HOLD if no future price data
                 else:
-                    label = 1  # HOLD if no price data
+                    label = 1  # HOLD if not enough future data
                 
                 X.append(features)
                 y.append(label)
@@ -754,43 +837,8 @@ class DecisionMakingAgent:
             logger.error(f"Error preparing historical training data: {e}")
             return None, None
     
-    def _prepare_synthetic_training_data(self) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Prepare synthetic training data based on rules.
-        
-        Returns:
-            Tuple of (features, labels) arrays
-        """
-        logger.info("Generating synthetic training data...")
-        
-        n_samples = 1000
-        X = []
-        y = []
-        
-        for _ in range(n_samples):
-            # Generate random features
-            features = np.random.rand(1, 14)[0]
-            
-            # Apply rule-based logic to generate labels
-            trend = features[9]  # Trend feature
-            rsi = features[5] * 100  # RSI (0-100)
-            macd_hist = features[7]  # MACD histogram
-            
-            # Rule-based label
-            if trend > 0.3 and rsi < 40 and macd_hist > 0:
-                label = 2  # BUY
-            elif trend < -0.3 and rsi > 60 and macd_hist < 0:
-                label = 0  # SELL
-            else:
-                label = 1  # HOLD
-            
-            X.append(features)
-            y.append(label)
-        
-        X = np.array(X)
-        y = np.array(y)
-        
-        return X, y
+    # УДАЛЕНО: _prepare_synthetic_training_data() - синтетические данные больше не используются
+    # Модель обучается только на реальных исторических данных
     
     def _retrain_with_real_data(self):
         """

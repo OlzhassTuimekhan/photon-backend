@@ -163,7 +163,7 @@ class Command(BaseCommand):
                 decision_agent = DecisionMakingAgent(
                     model_type="random_forest",
                     risk_tolerance="medium",
-                    min_confidence=0.50,  # Снижено для получения больше решений (для обучения)
+                    min_confidence=0.35,  # Снижено для получения больше решений (для обучения и тестирования)
                     enable_ai=True,
                     use_historical_training=True,  # Используем реальные данные для обучения
                     training_ticker=symbol_code,  # Используем тот же тикер (для крипты сработает Bybit fallback)
