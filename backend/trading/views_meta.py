@@ -579,3 +579,432 @@ class ApprovedAssetsView(APIView):
             "total_blacklisted": len(blacklisted)
         }, status=status.HTTP_200_OK)
 
+
+class MetaModelBacktestView(APIView):
+    """Эндпоинт для walk-forward бэктеста мета-модели"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Запускает walk-forward бэктест мета-модели
+        
+        Body:
+        {
+            "symbol": "SOLUSDT",  # Обязательно
+            "initial_balance": 10000.0,  # По умолчанию 10000
+            "train_window": 200,  # Размер окна обучения (по умолчанию 200)
+            "retrain_interval": 50,  # Интервал переобучения (по умолчанию 50)
+            "use_ensemble": true,  # Использовать ансамбль (по умолчанию true)
+            "use_regime_switching": true  # Использовать режим-свитчинг (по умолчанию true)
+        }
+        """
+        try:
+            symbol_code = request.data.get("symbol", "").upper()
+            initial_balance = float(request.data.get("initial_balance", 10000.0))
+            train_window = int(request.data.get("train_window", 200))
+            retrain_interval = int(request.data.get("retrain_interval", 50))
+            use_ensemble = request.data.get("use_ensemble", True)
+            use_regime_switching = request.data.get("use_regime_switching", True)
+            
+            if not symbol_code:
+                return Response(
+                    {"detail": "symbol is required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Получаем исторические данные
+            binance_service = BinanceAPIService()
+            historical_data = binance_service.get_historical_data(
+                symbol=symbol_code,
+                interval="1h",
+                days=30
+            )
+            
+            if not historical_data:
+                return Response(
+                    {"detail": f"Could not fetch data for {symbol_code}"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Конвертируем в DataFrame
+            df_data = []
+            for candle in historical_data:
+                df_data.append({
+                    "Open": float(candle["open"]),
+                    "High": float(candle["high"]),
+                    "Low": float(candle["low"]),
+                    "Close": float(candle["close"]),
+                    "Volume": float(candle["volume"]),
+                })
+            
+            df = pd.DataFrame(df_data)
+            df.index = [candle["timestamp"] for candle in historical_data]
+            
+            # Market Monitoring Agent для обработки данных
+            market_agent = MarketMonitoringAgent(
+                ticker=symbol_code,
+                interval="1h",
+                period="1mo",
+                enable_cache=False
+            )
+            market_agent.raw_data = df
+            data_with_indicators = market_agent.compute_indicators(df)
+            preprocessed_data = market_agent.preprocess(data_with_indicators)
+            
+            if preprocessed_data.empty or len(preprocessed_data) < train_window + 50:
+                return Response(
+                    {"detail": "Not enough data for backtesting"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Выполняем walk-forward бэктест
+            result = self._run_walk_forward_backtest(
+                preprocessed_data,
+                symbol_code,
+                initial_balance,
+                train_window,
+                retrain_interval,
+                use_ensemble,
+                use_regime_switching
+            )
+            
+            if not result.get("success", False):
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+            
+            return Response(result, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error in MetaModelBacktestView: {e}", exc_info=True)
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def _prepare_training_data(self, data: pd.DataFrame, end_idx: int) -> tuple:
+        """Подготавливает данные для обучения до указанного индекса"""
+        if end_idx < 200:
+            return None, None
+        
+        X = []
+        y = []
+        lookahead_periods = 6
+        min_profit_threshold = 0.5
+        
+        for i in range(end_idx - lookahead_periods):
+            if i + lookahead_periods >= end_idx:
+                break
+                
+            current_row = data.iloc[i]
+            
+            features = []
+            features.append(float(current_row.get('close', 0.0)))
+            features.append(float(current_row.get('volume', 0.0)))
+            features.append(float(current_row.get('price_change', 0.0)))
+            features.append(float(current_row.get('sma10', 0.0)))
+            features.append(float(current_row.get('sma20', 0.0)))
+            features.append(float(current_row.get('rsi14', 50.0)))
+            features.append(float(current_row.get('macd', 0.0)))
+            features.append(float(current_row.get('macd_hist', 0.0)))
+            features.append(float(current_row.get('volatility', 0.0)))
+            
+            sma10 = current_row.get('sma10', 0.0)
+            sma20 = current_row.get('sma20', 0.0)
+            if sma10 > sma20:
+                trend_encoded = 1.0
+            elif sma10 < sma20:
+                trend_encoded = -1.0
+            else:
+                trend_encoded = 0.0
+            features.append(trend_encoded)
+            
+            rsi = current_row.get('rsi14', 50.0)
+            strength = abs(rsi - 50) / 50
+            features.append(float(strength))
+            
+            if rsi > 70:
+                rsi_encoded = 1.0
+            elif rsi < 30:
+                rsi_encoded = -1.0
+            else:
+                rsi_encoded = 0.0
+            features.append(rsi_encoded)
+            
+            sma_cross = 0.0
+            if i > 0:
+                prev_row = data.iloc[i - 1]
+                prev_sma10 = prev_row.get('sma10', 0.0)
+                prev_sma20 = prev_row.get('sma20', 0.0)
+                if (prev_sma10 <= prev_sma20 and sma10 > sma20) or \
+                   (prev_sma10 >= prev_sma20 and sma10 < sma20):
+                    sma_cross = 1.0
+            features.append(sma_cross)
+            
+            # Генерация метки
+            current_price = current_row.get('close', 0.0)
+            if current_price > 0 and i + lookahead_periods < end_idx:
+                future_row = data.iloc[i + lookahead_periods]
+                future_price = future_row.get('close', 0.0)
+                
+                if future_price > 0:
+                    price_change_pct = ((future_price - current_price) / current_price) * 100
+                    if price_change_pct > min_profit_threshold:
+                        label = 2  # BUY
+                    elif price_change_pct < -min_profit_threshold:
+                        label = 0  # SELL
+                    else:
+                        label = 1  # HOLD
+                else:
+                    label = 1
+            else:
+                label = 1
+            
+            X.append(features)
+            y.append(label)
+        
+        if len(X) < 20:
+            return None, None
+        
+        return np.array(X), np.array(y)
+    
+    def _extract_features(self, row: pd.Series, prev_row: pd.Series = None) -> np.ndarray:
+        """Извлекает фичи из строки данных"""
+        features = []
+        features.append(float(row.get('close', 0.0)))
+        features.append(float(row.get('volume', 0.0)))
+        features.append(float(row.get('price_change', 0.0)))
+        features.append(float(row.get('sma10', 0.0)))
+        features.append(float(row.get('sma20', 0.0)))
+        features.append(float(row.get('rsi14', 50.0)))
+        features.append(float(row.get('macd', 0.0)))
+        features.append(float(row.get('macd_hist', 0.0)))
+        features.append(float(row.get('volatility', 0.0)))
+        
+        sma10 = row.get('sma10', 0.0)
+        sma20 = row.get('sma20', 0.0)
+        if sma10 > sma20:
+            trend_encoded = 1.0
+        elif sma10 < sma20:
+            trend_encoded = -1.0
+        else:
+            trend_encoded = 0.0
+        features.append(trend_encoded)
+        
+        rsi = row.get('rsi14', 50.0)
+        strength = abs(rsi - 50) / 50
+        features.append(float(strength))
+        
+        if rsi > 70:
+            rsi_encoded = 1.0
+        elif rsi < 30:
+            rsi_encoded = -1.0
+        else:
+            rsi_encoded = 0.0
+        features.append(rsi_encoded)
+        
+        sma_cross = 0.0
+        if prev_row is not None:
+            prev_sma10 = prev_row.get('sma10', 0.0)
+            prev_sma20 = prev_row.get('sma20', 0.0)
+            if (prev_sma10 <= prev_sma20 and sma10 > sma20) or \
+               (prev_sma10 >= prev_sma20 and sma10 < sma20):
+                sma_cross = 1.0
+        features.append(sma_cross)
+        
+        return np.array(features).reshape(1, -1)
+    
+    def _run_walk_forward_backtest(self, data: pd.DataFrame, symbol: str,
+                                   initial_balance: float, train_window: int,
+                                   retrain_interval: int, use_ensemble: bool,
+                                   use_regime_switching: bool) -> dict:
+        """Выполняет walk-forward бэктест"""
+        balance = initial_balance
+        position = None  # {quantity: float, entry_price: float}
+        trades = []
+        regime_counts = {'flat': 0, 'volatile': 0, 'trend': 0}
+        
+        meta_selector = MetaModelSelector()
+        action_map = {0: "SELL", 1: "HOLD", 2: "BUY"}
+        
+        total_records = len(data)
+        last_retrain_idx = train_window
+        
+        # Обучаем модели перед началом бэктеста
+        X, y = self._prepare_training_data(data, train_window)
+        if X is None or len(X) < 20:
+            return {
+                "success": False,
+                "detail": "Not enough data for initial training",
+                "symbol": symbol
+            }
+        meta_selector.train_base_models(symbol, X, y)
+        trained_models = list(meta_selector.base_models.get(symbol, {}).keys())
+        logger.info(f"Initial training completed for {symbol}. Trained models: {trained_models}")
+        
+        for i in range(train_window, total_records):
+            # Переобучение моделей
+            if i >= last_retrain_idx:
+                X, y = self._prepare_training_data(data, i)
+                if X is not None and len(X) >= 20:
+                    meta_selector.train_base_models(symbol, X, y)
+                    trained_models = list(meta_selector.base_models.get(symbol, {}).keys())
+                    logger.debug(f"[{i}/{total_records}] Retrained models for {symbol}. Models: {trained_models}")
+                    last_retrain_idx = i + retrain_interval
+            
+            # Проверяем, что модели обучены
+            if symbol not in meta_selector.base_models or not meta_selector.base_models[symbol]:
+                continue
+            
+            # Получаем текущую строку данных
+            current_row = data.iloc[i]
+            prev_row = data.iloc[i - 1] if i > 0 else None
+            
+            # Извлекаем фичи
+            features = self._extract_features(current_row, prev_row)
+            
+            # Получаем предсказание
+            prediction = None
+            confidence = 0.0
+            regime = 'flat'
+            
+            if use_ensemble:
+                pred_result = meta_selector.predict_ensemble_with_regime(
+                    symbol, features, data.iloc[:i+1], use_regime_switching
+                )
+                if pred_result[0] is not None:
+                    prediction, confidence, regime = pred_result
+                else:
+                    continue
+            else:
+                # Используем только первую модель
+                model_name = list(meta_selector.base_models[symbol].keys())[0]
+                model = meta_selector.base_models[symbol][model_name]
+                if symbol in meta_selector.scalers:
+                    features_scaled = meta_selector.scalers[symbol].transform(features)
+                else:
+                    features_scaled = features
+                try:
+                    prediction = model.predict(features_scaled)[0]
+                    proba = model.predict_proba(features_scaled)[0]
+                    confidence = float(max(proba))
+                    regime = meta_selector.regime_detector.detect_regime(data.iloc[:i+1])
+                except Exception as e:
+                    logger.error(f"Error predicting with {model_name}: {e}")
+                    continue
+            
+            if prediction is None:
+                continue
+            
+            regime_counts[regime] = regime_counts.get(regime, 0) + 1
+            
+            action = action_map.get(prediction, "HOLD")
+            current_price = float(current_row.get('close', 0.0))
+            
+            # Выполняем торговую логику
+            if action == "BUY" and position is None:
+                # Покупаем
+                trade_amount = balance * 0.9
+                quantity = trade_amount / current_price
+                position = {
+                    'quantity': quantity,
+                    'entry_price': current_price
+                }
+                balance -= trade_amount
+                trades.append({
+                    'index': i,
+                    'action': 'BUY',
+                    'price': current_price,
+                    'confidence': float(confidence),
+                    'regime': regime
+                })
+            
+            elif action == "SELL" and position is not None:
+                # Продаем
+                sell_amount = position['quantity'] * current_price
+                balance += sell_amount
+                pnl = sell_amount - (position['quantity'] * position['entry_price'])
+                pnl_pct = (pnl / (position['quantity'] * position['entry_price'])) * 100
+                
+                trades.append({
+                    'index': i,
+                    'action': 'SELL',
+                    'price': current_price,
+                    'confidence': float(confidence),
+                    'regime': regime,
+                    'pnl': float(pnl),
+                    'pnl_pct': float(pnl_pct)
+                })
+                position = None
+        
+        # Закрываем открытую позицию в конце
+        if position is not None:
+            last_price = float(data.iloc[-1].get('close', 0.0))
+            sell_amount = position['quantity'] * last_price
+            balance += sell_amount
+            pnl = sell_amount - (position['quantity'] * position['entry_price'])
+            pnl_pct = (pnl / (position['quantity'] * position['entry_price'])) * 100
+            
+            trades.append({
+                'index': len(data) - 1,
+                'action': 'SELL',
+                'price': last_price,
+                'confidence': 0.0,
+                'regime': 'flat',
+                'pnl': float(pnl),
+                'pnl_pct': float(pnl_pct),
+                'is_closing': True
+            })
+        
+        # Подсчитываем статистику
+        total_return = ((balance - initial_balance) / initial_balance) * 100
+        
+        # Подсчитываем прибыльные и убыточные сделки
+        profitable_trades = 0
+        losing_trades = 0
+        
+        i = 0
+        while i < len(trades):
+            if trades[i]['action'] == 'BUY':
+                # Ищем соответствующую SELL сделку
+                j = i + 1
+                while j < len(trades) and trades[j]['action'] != 'SELL':
+                    j += 1
+                if j < len(trades):
+                    pnl_pct = trades[j].get('pnl_pct', 0)
+                    if pnl_pct > 0:
+                        profitable_trades += 1
+                    elif pnl_pct < 0:
+                        losing_trades += 1
+                    i = j + 1
+                else:
+                    i += 1
+            else:
+                i += 1
+        
+        total_trades = profitable_trades + losing_trades
+        win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        # Получаем список обученных моделей
+        trained_models = list(meta_selector.base_models.get(symbol, {}).keys())
+        
+        return {
+            "success": True,
+            "symbol": symbol,
+            "initial_balance": initial_balance,
+            "final_balance": balance,
+            "total_return": total_return,
+            "total_trades": total_trades,
+            "profitable_trades": profitable_trades,
+            "losing_trades": losing_trades,
+            "win_rate": win_rate,
+            "regime_distribution": regime_counts,
+            "trades": trades,
+            "models_used": trained_models,
+            "models_count": len(trained_models),
+            "settings": {
+                "train_window": train_window,
+                "retrain_interval": retrain_interval,
+                "use_ensemble": use_ensemble,
+                "use_regime_switching": use_regime_switching
+            }
+        }
+

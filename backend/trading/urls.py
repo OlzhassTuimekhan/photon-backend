@@ -29,6 +29,7 @@ from trading.views_meta import (
     MetaModelAgentView,
     TradingChartDataView,
     ApprovedAssetsView,
+    MetaModelBacktestView,
 )
 
 router = DefaultRouter()
@@ -59,6 +60,7 @@ urlpatterns = [
     path("demo/orders/", DemoOrderView.as_view(), name="demo-orders"),
     # Новые эндпоинты для мета-модели
     path("meta-model/trade/", MetaModelAgentView.as_view(), name="meta-model-trade"),
+    path("meta-model/backtest/", MetaModelBacktestView.as_view(), name="meta-model-backtest"),
     path("meta-model/chart-data/", TradingChartDataView.as_view(), name="trading-chart-data"),
     path("meta-model/approved-assets/", ApprovedAssetsView.as_view(), name="approved-assets"),
 ]
