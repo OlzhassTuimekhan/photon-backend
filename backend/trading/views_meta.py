@@ -2,9 +2,11 @@
 Новые эндпоинты для мета-модели с фильтром активов
 """
 import logging
+import traceback
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -598,8 +600,10 @@ class MetaModelBacktestView(APIView):
             "use_regime_switching": true  # Использовать режим-свитчинг (по умолчанию true)
         }
         """
+        logger.info(f"MetaModelBacktestView POST request received. Data: {request.data}")
         try:
             symbol_code = request.data.get("symbol", "").upper()
+            logger.info(f"Processing backtest for symbol: {symbol_code}")
             initial_balance = float(request.data.get("initial_balance", 10000.0))
             train_window = int(request.data.get("train_window", 200))
             retrain_interval = int(request.data.get("retrain_interval", 50))
@@ -675,8 +679,14 @@ class MetaModelBacktestView(APIView):
             
         except Exception as e:
             logger.error(f"Error in MetaModelBacktestView: {e}", exc_info=True)
+            error_trace = traceback.format_exc()
+            logger.error(f"Full traceback: {error_trace}")
             return Response(
-                {"detail": str(e)},
+                {
+                    "detail": str(e),
+                    "error_type": type(e).__name__,
+                    "traceback": error_trace if settings.DEBUG else None
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
