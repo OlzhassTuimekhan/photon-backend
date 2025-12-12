@@ -605,8 +605,8 @@ class MetaModelBacktestView(APIView):
             symbol_code = request.data.get("symbol", "").upper()
             logger.info(f"Processing backtest for symbol: {symbol_code}")
             initial_balance = float(request.data.get("initial_balance", 10000.0))
-            train_window = int(request.data.get("train_window", 200))
-            retrain_interval = int(request.data.get("retrain_interval", 50))
+            train_window = int(request.data.get("train_window", 150))
+            retrain_interval = int(request.data.get("retrain_interval", 100))
             use_ensemble = request.data.get("use_ensemble", True)
             use_regime_switching = request.data.get("use_regime_switching", True)
             
@@ -616,12 +616,12 @@ class MetaModelBacktestView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Получаем исторические данные
+            # Получаем исторические данные (14 дней для оптимизации)
             binance_service = BinanceAPIService()
             historical_data = binance_service.get_historical_data(
                 symbol=symbol_code,
                 interval="1h",
-                days=30
+                days=14
             )
             
             if not historical_data:
