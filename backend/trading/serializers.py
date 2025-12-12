@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import serializers
 from trading.models import (
     Symbol,
@@ -93,7 +96,7 @@ class TradingDecisionSerializer(serializers.ModelSerializer):
             symbol=obj.symbol,
             action=obj.decision,
             executed_at__gte=obj.created_at,
-            executed_at__lte=obj.created_at + timezone.timedelta(minutes=5)  # В пределах 5 минут
+            executed_at__lte=obj.created_at + timedelta(minutes=5)  # В пределах 5 минут
         ).first()
         
         return "executed" if trade else "pending"
